@@ -1,0 +1,19 @@
+# Output directory dei cloni (se le app la creano in futuro)
+cloned_repos/
+
+# Maven build output
+target/
+
+# Log
+*.log
+
+# Configurazioni IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# File di sistema
+.DS_Store
+Thumbs.db
