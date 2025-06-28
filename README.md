@@ -22,21 +22,37 @@ Questo repository contiene due applicazioni Java sviluppate per il progetto di t
 
 
 
+\## Requisiti
+
+
+
+Prima di eseguire le applicazioni, è necessario:
+
+
+
+\- Avere Java (versione 17 o superiore) e Maven installati.
+
+\- Configurare e avviare un'istanza locale di \[SEART](https://seart-ghs.si.usi.ch/) seguendo le istruzioni riportate nel progetto Docker Compose fornito (cartella `ghs` esterna a questo repository).
+
+\- Impostare un token GitHub per autenticarsi durante il clonaggio dei repository.
+
+
+
 \## Come eseguire
 
 
 
 1\. Assicurati di avere Java e Maven installati.
 
-2\. Imposta la variabile ambiente `GITHUB\_TOKEN`.
-
-3\. Entra nella cartella desiderata e lancia:
+2\. Imposta la variabile ambiente `GITHUB\_TOKEN`:
 
 
+
+&nbsp;  \*\*Windows PowerShell\*\*
 
 &nbsp;  ```powershell
 
-&nbsp;  mvn exec:java
+&nbsp;  $env:GITHUB\_TOKEN="ghp\_tuo\_token"
 
 
 
