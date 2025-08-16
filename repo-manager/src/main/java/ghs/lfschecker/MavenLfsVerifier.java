@@ -1,53 +1,38 @@
 package ghs.lfschecker;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import ghs.classify.RepoClassifier;
+import ghs.classify.RepoClassifier.WarmupRepoIssue;
+import ghs.config.Settings;
+import ghs.exec.ProcessRunner;
+import ghs.git.GitCloner;
+import ghs.maven.MavenExecutor;
+import ghs.scan.ArtifactScanner;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import org.eclipse.jgit.api.CloneCommand;
-import org.eclipse.jgit.api.Git;
-import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider;
 
-/**
- * Screening di massa dei repository Maven:
- *  1. Clona rapidamente con JGit (shallow, ramo principale se esiste, altrimenti master).
- *  2. Esegue "mvn verify" (test compilati ma non eseguiti).
- *  3. Se la build fallisce e il repo usa Git-LFS, lo aggiunge a needs-lfs.txt.
- *  4. (Facoltativo) seconda passata con git-lfs sui repo falliti.
- *
- *  Requisiti:
- *   - Java 17+
- *   - git & git-lfs nel PATH
- *   - Variabile d’ambiente GITHUB_TOKEN per repo privati / rate-limit alto
- */
 public class MavenLfsVerifier {
 
-  private static final Path BASE_DIR = Paths.get("cloned_repos");
-  private static final Path NEEDS_LFS_FILE = Paths.get("needs-lfs.txt");
-  private static final Path OK_FILE = Paths.get("build-ok.txt");
-  private static String LOCAL_REPO; // cache Maven dedicata
-
-  /** repo che hanno compilato (test saltati) durante **questo** run */
-  private static final List<String> completed = Collections.synchronizedList(
-    new ArrayList<>()
-  );
-
-  /** URL Git con credenziali hard-coded → skip */
   private static final Pattern URL_WITH_CREDENTIALS = Pattern.compile(
     "^https?://[^/\\s]+:[^@\\s]+@.*$"
   );
 
+  // Stato condiviso
+  private static final Set<String> SKIP_BUILD = ConcurrentHashMap.newKeySet();
+  private static final List<String> COMPLETED = Collections.synchronizedList(
+    new ArrayList<>()
+  );
+
   public static void main(String[] args) throws Exception {
-    LOCAL_REPO = System.getenv()
-      .getOrDefault("MAVEN_LOCAL_REPO", "C:\\temp\\m2-cache");
+    Settings s = Settings.fromEnv();
 
     if (args.length == 1 && "--lfs".equals(args[0])) {
-      secondPassWithLfs();
+      secondPassWithLfs(s);
       return;
     }
     if (args.length != 1) {
@@ -61,267 +46,400 @@ public class MavenLfsVerifier {
       StandardCharsets.UTF_8
     )
       .stream()
-      .filter(s -> !s.isBlank())
+      .filter(x -> !x.isBlank())
       .collect(Collectors.toList());
 
-    Files.createDirectories(BASE_DIR);
+    Files.createDirectories(s.baseDir());
     List<String> needsLfs = new ArrayList<>();
+    RepoClassifier classifier = new RepoClassifier();
+    GitCloner git = new GitCloner();
+    MavenExecutor mvn = new MavenExecutor();
+    ArtifactScanner scanner = new ArtifactScanner();
 
-    ExecutorService pool = Executors.newFixedThreadPool(
+    // clean *.lastUpdated opzionale
+    if (s.cleanLastUpdated()) {
+      int removed = classifier.cleanLastUpdated(Paths.get(s.localRepo()));
+      System.out.println(
+        "Rimossi " +
+        removed +
+        " file *.lastUpdated nella cache: " +
+        s.localRepo()
+      );
+    }
+
+    /* ---------- clone parallelo ---------- */
+    System.out.println("Clonazione repository …");
+    ExecutorService clonePool = Executors.newFixedThreadPool(
       Math.max(4, Runtime.getRuntime().availableProcessors())
     );
+    Map<String, Path> repoToPath = new ConcurrentHashMap<>();
+    for (String url : urls) {
+      clonePool.submit(() -> {
+        Path dest = cloneRepository(url, s, git);
+        if (dest != null) repoToPath.put(url, dest);
+      });
+    }
+    clonePool.shutdown();
+    clonePool.awaitTermination(6, TimeUnit.HOURS);
 
-    for (String url : urls) pool.submit(() -> handleRepository(url, needsLfs));
+    /* ---------- warm-up parallelo bounded ---------- */
+    System.out.println(
+      "Warm-up dependency:go-offline in parallelo controllato …"
+    );
+    int cores = Runtime.getRuntime().availableProcessors();
+    int k = Math.min(4, Math.max(2, cores));
+    ExecutorService warmPool = Executors.newFixedThreadPool(k);
+    for (Map.Entry<String, Path> e : repoToPath.entrySet()) {
+      warmPool.submit(() ->
+        warmUpRepo(e.getKey(), e.getValue(), s, mvn, classifier)
+      );
+    }
+    warmPool.shutdown();
+    warmPool.awaitTermination(6, TimeUnit.HOURS);
 
-    pool.shutdown();
-
-    /* monitor ogni 30 s, senza timeout globale */
-    while (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
-      int active = ((ThreadPoolExecutor) pool).getActiveCount();
+    /* ---------- build parallela offline ---------- */
+    System.out.println("Build parallele – fase verify …");
+    ExecutorService buildPool = Executors.newFixedThreadPool(
+      Math.max(4, Runtime.getRuntime().availableProcessors())
+    );
+    for (Map.Entry<String, Path> entry : repoToPath.entrySet()) {
+      String url = entry.getKey();
+      if (SKIP_BUILD.contains(url)) continue;
+      Path dir = entry.getValue();
+      buildPool.submit(() -> handleBuild(url, dir, s, mvn, scanner, needsLfs));
+    }
+    buildPool.shutdown();
+    while (!buildPool.awaitTermination(30, TimeUnit.SECONDS)) {
+      int active = ((ThreadPoolExecutor) buildPool).getActiveCount();
       System.out.printf("Thread Maven attivi: %d%n", active);
     }
 
-    /* salva (o aggiorna) needs-lfs.txt */
-    Files.write(NEEDS_LFS_FILE, needsLfs, StandardCharsets.UTF_8);
-    System.out.println("Salvato needs-lfs.txt → " + NEEDS_LFS_FILE);
+    /* ---------- output ---------- */
+    Files.write(s.needsLfsFile(), needsLfs, StandardCharsets.UTF_8);
+    System.out.println("\nSalvato needs-lfs.txt → " + s.needsLfsFile());
 
-    /* riepilogo di fine run */
+    Files.write(
+      s.okFile(),
+      COMPLETED,
+      StandardCharsets.UTF_8,
+      StandardOpenOption.CREATE,
+      StandardOpenOption.TRUNCATE_EXISTING
+    );
     System.out.println("\nRepository compilati in questo run:");
-    completed.forEach(r -> System.out.println("   • " + r));
+    COMPLETED.forEach(r -> System.out.println("   • " + r));
   }
 
-  /* ================================================================ */
-  /*                         REPO HANDLER                             */
-  /* ================================================================ */
+  /* ================= orchestrazione per repo ================= */
 
-  private static void handleRepository(String url, List<String> needsLfs) {
+  private static Path cloneRepository(String url, Settings s, GitCloner git) {
     if (URL_WITH_CREDENTIALS.matcher(url).matches()) {
       System.out.println("Skip repo con credenziali: " + url);
-      return;
+      return null;
     }
-
     String name = repoName(url);
-    Path dest = BASE_DIR.resolve(name);
-
+    Path dest = s.baseDir().resolve(name);
     try {
       if (Files.exists(dest)) {
         System.out.println("Repo già presente, salto clone: " + name);
-      } else {
-        System.out.println("Clonando (JGit) " + name);
-        cloneWithJGit(url, dest);
+        return dest;
       }
+      System.out.println("Clonando (JGit) " + name);
+      return git.cloneShallowJGit(url, dest);
+    } catch (Exception ex) {
+      System.err.println("Errore clone " + name + ": " + ex.getMessage());
+      return null;
+    }
+  }
 
-      if (runMavenVerify(dest)) { // BUILD SUCCESS
-        completed.add(name);
-        appendBuildOk(name); // <-- persistenza immediata
-        System.out.println("✅ Build OK (tests skipped): " + name);
+  private static void warmUpRepo(
+    String repoUrl,
+    Path repoDir,
+    Settings s,
+    MavenExecutor mvn,
+    RepoClassifier classifier
+  ) {
+    if (Files.notExists(repoDir.resolve("pom.xml"))) return;
+
+    // Pre-filtro JDK8/tools.jar
+    if (classifier.requiresJdk8Tools(repoDir)) {
+      System.out.println("Richiede JDK8 (tools.jar): " + repoDir.getFileName());
+      RepoClassifier.appendLine(s.needsJdk8File(), repoUrl);
+      SKIP_BUILD.add(repoUrl);
+      return;
+    }
+
+    String lastOutput = "";
+    for (int attempt = 1; attempt <= s.maxRetries(); attempt++) {
+      ProcessRunner.Result res = mvn.warmup(repoDir, s);
+      if (res.exit() == 0) {
+        System.out.println("✅ Warm-up OK: " + repoUrl);
         return;
       }
+      lastOutput = res.output();
+      System.err.printf(
+        "⚠️  go-offline fallito (%d/%d) per %s%n",
+        attempt,
+        s.maxRetries(),
+        repoDir.getFileName()
+      );
+      sleepSilently(2);
+    }
 
-      /* BUILD KO → verifica LFS */
-      if (usesLfs(dest)) {
-        synchronized (needsLfs) {
-          needsLfs.add(url);
+    WarmupRepoIssue issue = classifier.classifyWarmupFailure(lastOutput);
+    if (issue != WarmupRepoIssue.NONE) {
+      String note =
+        switch (issue) {
+          case HTTP_401 -> "  # 401 Unauthorized durante go-offline";
+          case HTTP_403 -> "  # 403 Forbidden durante go-offline";
+          case HTTP_409 -> "  # 409 Conflict durante go-offline";
+          case SNAPSHOT_MISSING -> "  # SNAPSHOT mancante/non pubblicato durante go-offline";
+          default -> "";
+        };
+
+      RepoClassifier.appendLine(s.needsExtRepoFile(), repoUrl + note);
+      SKIP_BUILD.add(repoUrl);
+    }
+    System.err.println("Warm-up NON riuscito per " + repoDir.getFileName());
+  }
+
+  private static void handleBuild(
+    String url,
+    Path repoDir,
+    Settings s,
+    MavenExecutor mvn,
+    ArtifactScanner scanner,
+    List<String> needsLfs
+  ) {
+    String name = repoName(url);
+    try {
+      // slack 2s per sicurezza su FS con risoluzione grossolana
+      Instant start = Instant.now().minusSeconds(2);
+
+      if (mvn.verify(repoDir, s) == 0) {
+        // Artefatti "nuovi" (JAR/WAR/EAR) + directories target/classes con .class
+        List<Path> jarArtifacts = scanner.listProducedArtifacts(repoDir, start);
+        List<Path> classDirs = scanner.listClassesDirs(repoDir, start);
+
+        List<Path> artifacts = new ArrayList<>(
+          jarArtifacts.size() + classDirs.size()
+        );
+        artifacts.addAll(jarArtifacts);
+        artifacts.addAll(classDirs);
+
+        if (!artifacts.isEmpty()) {
+          COMPLETED.add(name);
+          System.out.println("Build OK (tests skipped): " + name);
+          artifacts.forEach(p ->
+            System.out.println(
+              "   ↳ artefatto: " + ArtifactScanner.relToBase(s.baseDir(), p)
+            )
+          );
+
+          // opzionale: genera classpath.txt per i moduli rilevati
+          maybeGenerateClasspath(artifacts, s);
+        } else {
+          // Fallback: artefatti preesistenti
+          List<Path> existing = new ArrayList<>();
+          existing.addAll(
+            scanner.listProducedArtifacts(repoDir, Instant.EPOCH)
+          );
+          existing.addAll(scanner.listClassesDirs(repoDir, Instant.EPOCH));
+
+          if (!existing.isEmpty()) {
+            COMPLETED.add(name);
+            System.out.println(
+              "BUILD SUCCESS (artefatti preesistenti): " + name
+            );
+            existing.forEach(p ->
+              System.out.println(
+                "   ↳ artefatto: " + ArtifactScanner.relToBase(s.baseDir(), p)
+              )
+            );
+            maybeGenerateClasspath(existing, s);
+          } else {
+            System.out.println(
+              "BUILD SUCCESS ma nessun artefatto trovato: " + name
+            );
+            if (usesLfs(repoDir)) {
+              synchronized (needsLfs) {
+                needsLfs.add(url);
+              }
+              System.out.println(
+                "Contrassegnato per seconda passata con LFS: " + name
+              );
+            }
+          }
         }
-        System.out.println("Build KO ma usa LFS: " + name);
       } else {
-        System.out.println("Build KO: " + name);
+        if (usesLfs(repoDir)) {
+          synchronized (needsLfs) {
+            needsLfs.add(url);
+          }
+          System.out.println("Build KO ma usa LFS: " + name);
+        } else {
+          System.out.println("Build KO: " + name);
+        }
       }
     } catch (Exception ex) {
-      System.err.println("Errore su " + name + ": " + ex.getMessage());
+      System.err.println("Errore build " + name + ": " + ex.getMessage());
     }
   }
 
-  /* ---------------------------------------------------------------- */
-  /*                        PERSISTENZA build-ok                      */
-  /* ---------------------------------------------------------------- */
+  /* ================= util locali ================= */
 
-  /** Scrive <name> in build-ok.txt, creando il file se manca. */
-  private static synchronized void appendBuildOk(String name) {
-    try {
-      Files.write(
-        OK_FILE,
-        List.of(name),
-        StandardCharsets.UTF_8,
-        StandardOpenOption.CREATE,
-        StandardOpenOption.APPEND
-      );
-    } catch (IOException e) {
-      System.err.println(
-        "Impossibile scrivere build-ok.txt: " + e.getMessage()
-      );
+  /**
+   * Se GENERATE_CLASSPATH=1, per ogni artefatto che appartiene a un modulo Maven
+   * (JAR in target/… o directory target/classes) genera target/classpath.txt
+   * tramite dependency:build-classpath (scope configurabile via CLASSPATH_SCOPE).
+   */
+  private static void maybeGenerateClasspath(List<Path> artifacts, Settings s) {
+    if (
+      !"1".equals(System.getenv().getOrDefault("GENERATE_CLASSPATH", "0"))
+    ) return;
+    String scope = System.getenv().getOrDefault("CLASSPATH_SCOPE", "compile");
+
+    // deduplica moduli: da .../module/target/classes o .../module/target/*.jar → modulo = .../module
+    Set<Path> modules = new LinkedHashSet<>();
+    for (Path p : artifacts) {
+      Path module = null;
+      if (Files.isDirectory(p)) { // target/classes
+        Path target = p.getParent(); // .../target
+        module = (target != null) ? target.getParent() : null; // .../module
+      } else { // file jar/war/ear in .../target
+        Path target = p.getParent(); // .../target
+        module = (target != null) ? target.getParent() : null; // .../module
+      }
+      if (module != null && Files.isDirectory(module)) {
+        modules.add(module);
+      }
+    }
+
+    for (Path module : modules) {
+      try {
+        String mvnCmd = resolveMavenExecutable(module);
+        Path out = module.resolve("target").resolve("classpath.txt");
+        Files.createDirectories(out.getParent());
+        List<String> cmd = List.of(
+          mvnCmd,
+          "-Dmaven.repo.local=" + s.localRepo(),
+          "--offline",
+          "-q",
+          "-DincludeScope=" + scope,
+          "-Dmdep.outputFile=" + out.toAbsolutePath().toString(),
+          "dependency:build-classpath"
+        );
+        int exit = ProcessRunner.run(cmd, module, Duration.ofMinutes(5));
+        if (exit == 0) {
+          System.out.println(
+            "   ↳ classpath.txt generato: " +
+            ArtifactScanner.relToBase(s.baseDir(), out)
+          );
+        } else {
+          System.out.println(
+            "   ↳ classpath.txt NON generato per " +
+            ArtifactScanner.relToBase(s.baseDir(), module)
+          );
+        }
+      } catch (Exception e) {
+        System.out.println(
+          "   ↳ classpath.txt errore su " +
+          ArtifactScanner.relToBase(s.baseDir(), module) +
+          ": " +
+          e.getMessage()
+        );
+      }
     }
   }
 
-  /* ================================================================ */
-  /*                          CLONE METHODS                           */
-  /* ================================================================ */
-
-  private static void cloneWithJGit(String url, Path dest) throws Exception {
-    String token = System.getenv("GITHUB_TOKEN");
-
-    try { // branch main
-      cloneOnce(url, dest, token, "refs/heads/main");
-      return;
-    } catch (Exception ignore) {
-      deleteDirectory(dest);
+  // Piccolo helper locale (evita dipendenza circolare). Duplicato volutamente qui.
+  private static String resolveMavenExecutable(Path repoDir) {
+    boolean win = System.getProperty("os.name").toLowerCase().contains("win");
+    Path mvnw = repoDir.resolve(win ? "mvnw.cmd" : "mvnw");
+    if (Files.isRegularFile(mvnw) && Files.isExecutable(mvnw)) {
+      return mvnw.toAbsolutePath().toString(); // wrapper del repo
     }
-
-    try { // branch master
-      cloneOnce(url, dest, token, "refs/heads/master");
-      return;
-    } catch (Exception ignore) {
-      deleteDirectory(dest);
+    if (isOnPath(win ? "mvnd.cmd" : "mvnd")) {
+      return win ? "mvnd.cmd" : "mvnd"; // Maven Daemon se presente
     }
-
-    /* default branch remoto */
-    String headRef = remoteHead(url, token);
-    System.out.println("🔍 Default branch: " + headRef);
-    cloneOnce(url, dest, token, headRef);
+    return win ? "mvn.cmd" : "mvn";
   }
 
-  private static String remoteHead(String url, String token) throws Exception {
-    var cmd = Git.lsRemoteRepository().setRemote(url).setHeads(true);
-    if (token != null && !token.isBlank()) {
-      cmd.setCredentialsProvider(
-        new UsernamePasswordCredentialsProvider(token, "")
-      );
+  private static boolean isOnPath(String exe) {
+    String path = System.getenv("PATH");
+    if (path == null) return false;
+    String sep = System.getProperty("os.name").toLowerCase().contains("win")
+      ? ";"
+      : ":";
+    for (String dir : path.split(sep)) {
+      if (Files.isExecutable(Paths.get(dir, exe))) return true;
     }
-    return cmd
-      .call()
-      .stream()
-      .filter(r -> r.getName().equals("HEAD"))
-      .findFirst()
-      .map(r -> r.getTarget().getName())/* refs/heads/xyz */
-      .orElseThrow(() -> new IllegalStateException("HEAD remoto non trovato"));
+    return false;
   }
 
-  private static void cloneOnce(
-    String url,
-    Path dest,
-    String token,
-    String ref
-  ) throws Exception {
-    CloneCommand cmd = Git.cloneRepository()
-      .setURI(url)
-      .setDirectory(dest.toFile())
-      .setDepth(1)
-      .setCloneAllBranches(false)
-      .setBranchesToClone(List.of(ref))
-      .setBranch(ref);
-    if (token != null && !token.isBlank()) {
-      cmd.setCredentialsProvider(
-        new UsernamePasswordCredentialsProvider(token, "")
-      );
-    }
-    cmd.call();
-  }
-
-  /* ================================================================ */
-  /*                         BUILD / MAVEN                            */
-  /* ================================================================ */
-
-  private static boolean runMavenVerify(Path repoDir) throws Exception {
-    String mvn = System.getProperty("os.name").toLowerCase().contains("win")
-      ? "mvn.cmd"
-      : "mvn";
-    List<String> cmd = List.of(
-      mvn,
-      "-Dmaven.repo.local=" + LOCAL_REPO, //  ←← AGGIUNTO
-      "-B",
-      "-DskipTests",
-      "verify"
-    );
-
-    int exit = runProcess(cmd, repoDir);
-    return exit == 0;
-  }
-
-  private static int runProcess(List<String> cmd, Path cwd) throws Exception {
-    ProcessBuilder pb = new ProcessBuilder(cmd);
-    if (cwd != null) pb.directory(cwd.toFile());
-    pb.redirectErrorStream(true);
-    Process p = pb.start();
-
-    try (
-      BufferedReader r = new BufferedReader(
-        new InputStreamReader(p.getInputStream())
-      )
-    ) {
-      String line;
-      while ((line = r.readLine()) != null) System.out.println(line);
-    }
-
-    if (!p.waitFor(30, TimeUnit.MINUTES)) {
-      System.err.println("Timeout (30 min) – kill processo");
-      p.destroyForcibly();
-      return -1;
-    }
-    return p.exitValue();
-  }
-
-  /* ================================================================ */
-  /*                             UTILS                                */
-  /* ================================================================ */
-
-  private static boolean usesLfs(Path repoDir) {
-    Path attr = repoDir.resolve(".gitattributes");
-    if (!Files.exists(attr)) return false;
-    try {
-      return Files.lines(attr).anyMatch(l -> l.contains("filter=lfs"));
-    } catch (IOException e) {
-      return false;
-    }
-  }
+  /* ================= vari utility rimaste qui ================= */
 
   private static String repoName(String url) {
     String name = url.substring(url.lastIndexOf('/') + 1);
     return name.endsWith(".git") ? name.substring(0, name.length() - 4) : name;
   }
 
-  private static void deleteDirectory(Path path) throws IOException {
-    if (!Files.exists(path)) return;
-    Files.walk(path)
-      .sorted(Comparator.reverseOrder())
-      .forEach(p -> {
-        try {
-          Files.delete(p);
-        } catch (IOException ignored) {}
-      });
+  private static boolean usesLfs(Path repoDir) {
+    Path attr = repoDir.resolve(".gitattributes");
+    if (!Files.exists(attr)) return false;
+    try (java.util.stream.Stream<String> lines = Files.lines(attr)) {
+      return lines.anyMatch(l -> l.contains("filter=lfs"));
+    } catch (Exception e) {
+      return false;
+    }
   }
 
-  /* ================================================================ */
-  /*                       SECOND PASS – GIT LFS                      */
-  /* ================================================================ */
+  private static void sleepSilently(int seconds) {
+    try {
+      TimeUnit.SECONDS.sleep(seconds);
+    } catch (InterruptedException ignored) {
+      Thread.currentThread().interrupt();
+    }
+  }
 
-  private static void secondPassWithLfs() throws Exception {
-    if (!Files.exists(NEEDS_LFS_FILE)) {
+  /* ---------------- seconda pass LFS ---------------- */
+  private static void secondPassWithLfs(Settings s) throws Exception {
+    if (!Files.exists(s.needsLfsFile())) {
       System.out.println("Nessun needs-lfs.txt: niente da fare.");
       return;
     }
     List<String> urls = Files.readAllLines(
-      NEEDS_LFS_FILE,
+      s.needsLfsFile(),
       StandardCharsets.UTF_8
     )
       .stream()
-      .filter(s -> !s.isBlank())
+      .filter(x -> !x.isBlank())
       .collect(Collectors.toList());
+
+    GitCloner git = new GitCloner();
+    MavenExecutor mvn = new MavenExecutor();
 
     ExecutorService pool = Executors.newFixedThreadPool(
       Math.max(4, Runtime.getRuntime().availableProcessors())
     );
-    for (String url : urls) pool.submit(() -> reprocessRepoWithLfs(url));
+    for (String url : urls) pool.submit(() ->
+      reprocessRepoWithLfs(url, s, git, mvn)
+    );
     pool.shutdown();
     pool.awaitTermination(6, TimeUnit.HOURS);
   }
 
-  private static void reprocessRepoWithLfs(String url) {
+  private static void reprocessRepoWithLfs(
+    String url,
+    Settings s,
+    GitCloner git,
+    MavenExecutor mvn
+  ) {
     String name = repoName(url);
-    Path dest = BASE_DIR.resolve(name + "_lfs");
+    Path dest = s.baseDir().resolve(name + "_lfs");
     try {
       System.out.println("Second pass (Git+LFS) su " + name);
-      cloneWithGitCli(url, dest);
-      if (runMavenVerify(dest)) {
+      git.cloneWithLfsCli(url, dest, s);
+      if (mvn.verify(dest, s) == 0) {
         System.out.println("Build OK con LFS: " + name);
       } else {
         System.out.println("Ancora KO dopo LFS: " + name);
@@ -331,22 +449,5 @@ public class MavenLfsVerifier {
         "Errore seconda pass su " + name + ": " + ex.getMessage()
       );
     }
-  }
-
-  private static void cloneWithGitCli(String url, Path dest) throws Exception {
-    if (Files.exists(dest)) deleteDirectory(dest);
-    runProcess(
-      List.of(
-        "git",
-        "clone",
-        "--depth",
-        "1",
-        "--single-branch",
-        url,
-        dest.toString()
-      ),
-      null
-    );
-    runProcess(List.of("git", "lfs", "pull"), dest);
   }
 }
