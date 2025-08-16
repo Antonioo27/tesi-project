@@ -14,6 +14,12 @@ target/
 *.ipr
 *.iws
 
+**/*.txt
+
+
+
+
+
 # File di sistema
 .DS_Store
 Thumbs.db
