@@ -16,8 +16,7 @@ target/
 
 **/*.txt
 
-
-
+**/out/
 
 
 # File di sistema

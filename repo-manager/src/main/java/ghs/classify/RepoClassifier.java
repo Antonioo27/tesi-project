@@ -6,6 +6,7 @@ import java.nio.file.*;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
+import java.util.regex.Pattern;
 
 public final class RepoClassifier {
 

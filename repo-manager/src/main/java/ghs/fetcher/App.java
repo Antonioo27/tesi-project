@@ -29,7 +29,7 @@ public class App {
       System.getenv().getOrDefault("SEARCH_API_PAGE_SIZE", "100")
     );
     int maxPages = Integer.parseInt(
-      System.getenv().getOrDefault("SEARCH_API_MAX_PAGES", "2")
+      System.getenv().getOrDefault("SEARCH_API_MAX_PAGES", "4")
     );
     long delayMs = Long.parseLong(
       System.getenv().getOrDefault("SEARCH_API_DELAY_MS", "250")
@@ -69,7 +69,7 @@ public class App {
       "Salvati " + allUrls.size() + " progetti Maven in repos.txt"
     );
 
-    System.out.println("🚀 Avvio verifica clone + build …");
+    System.out.println("Avvio verifica clone + build …");
     MavenLfsVerifier.main(new String[] { reposFile.toString() });
   }
 
@@ -99,7 +99,7 @@ public class App {
 
         String body = new String(stream.readAllBytes());
         if (responseCode != 200) {
-          System.err.println("❌ Errore HTTP: " + responseCode + " – " + body);
+          System.err.println("Errore HTTP: " + responseCode + " – " + body);
           return List.of();
         }
 
@@ -126,7 +126,7 @@ public class App {
         return urls;
       } catch (IOException ioe) {
         System.err.println(
-          "⚠️  fetch fallito (" + attempt + "): " + ioe.getMessage()
+          "fetch fallito (" + attempt + "): " + ioe.getMessage()
         );
         Thread.sleep(300L * attempt); // backoff lineare
       }

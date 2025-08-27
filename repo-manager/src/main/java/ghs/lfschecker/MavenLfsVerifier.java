@@ -279,26 +279,44 @@ public class MavenLfsVerifier {
         } else {
           System.out.println("Build KO: " + name);
         }
+        // ✅ Opzionale: ripulisci i target/ su fail se richiesto da env
+        if ("1".equals(System.getenv().getOrDefault("PURGE_ON_FAIL", "1"))) {
+          purgeTargets(repoDir);
+        }
       }
     } catch (Exception ex) {
       System.err.println("Errore build " + name + ": " + ex.getMessage());
     }
   }
 
+  /**
+   * Rimuove tutte le directory "target" all'interno della repo, per evitare residui.
+   */
+  private static void purgeTargets(Path repoDir) {
+    try (var s = Files.walk(repoDir)) {
+      s.filter(p -> p.getFileName().toString().equals("target"))
+        .sorted(Comparator.reverseOrder())
+        .forEach(p -> {
+          try {
+            Files.walk(p)
+              .sorted(Comparator.reverseOrder())
+              .forEach(q -> {
+                try { Files.deleteIfExists(q); } catch (Exception ignored) {}
+              });
+          } catch (Exception ignored) {}
+        });
+      System.out.println("   ↳ target/ rimossi per: " + repoDir.getFileName());
+    } catch (Exception ignored) {}
+  }
+
   /* ================= util locali ================= */
 
-  /**
-   * Se GENERATE_CLASSPATH=1, per ogni artefatto che appartiene a un modulo Maven
-   * (JAR in target/… o directory target/classes) genera target/classpath.txt
-   * tramite dependency:build-classpath (scope configurabile via CLASSPATH_SCOPE).
-   */
   private static void maybeGenerateClasspath(List<Path> artifacts, Settings s) {
     if (
       !"1".equals(System.getenv().getOrDefault("GENERATE_CLASSPATH", "0"))
     ) return;
     String scope = System.getenv().getOrDefault("CLASSPATH_SCOPE", "compile");
 
-    // deduplica moduli: da .../module/target/classes o .../module/target/*.jar → modulo = .../module
     Set<Path> modules = new LinkedHashSet<>();
     for (Path p : artifacts) {
       Path module = null;
@@ -351,7 +369,6 @@ public class MavenLfsVerifier {
     }
   }
 
-  // Piccolo helper locale (evita dipendenza circolare). Duplicato volutamente qui.
   private static String resolveMavenExecutable(Path repoDir) {
     boolean win = System.getProperty("os.name").toLowerCase().contains("win");
     Path mvnw = repoDir.resolve(win ? "mvnw.cmd" : "mvnw");
@@ -375,8 +392,6 @@ public class MavenLfsVerifier {
     }
     return false;
   }
-
-  /* ================= vari utility rimaste qui ================= */
 
   private static String repoName(String url) {
     String name = url.substring(url.lastIndexOf('/') + 1);
@@ -440,9 +455,14 @@ public class MavenLfsVerifier {
       System.out.println("Second pass (Git+LFS) su " + name);
       git.cloneWithLfsCli(url, dest, s);
       if (mvn.verify(dest, s) == 0) {
-        System.out.println("Build OK con LFS: " + name);
+        System.out.println("Build OK con LFS: " + name + " → aggiungo a build-ok.txt come '" + name + "_lfs'");
+        // ✅ aggiungi la repo LFS al file ok con il nome di cartella realmente analizzabile
+        RepoClassifier.appendLine(s.okFile(), name + "_lfs");
       } else {
         System.out.println("Ancora KO dopo LFS: " + name);
+        if ("1".equals(System.getenv().getOrDefault("PURGE_ON_FAIL", "1"))) {
+          purgeTargets(dest);
+        }
       }
     } catch (Exception ex) {
       System.err.println(
