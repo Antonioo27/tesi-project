@@ -9,7 +9,9 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
 import org.json.JSONObject;
+
 import sootup.callgraph.CallGraph;
 import sootup.callgraph.ClassHierarchyAnalysisAlgorithm;
 import sootup.core.inputlocation.AnalysisInputLocation;
@@ -75,16 +77,18 @@ public final class AnalyzerApp {
       ? getBool(cli, "autoFastHeuristic", true)
       : getBoolOpt("autoFastHeuristic", "AUTO_FAST_HEURISTIC", true);
 
+    // --- nuove opzioni: preflight & gestione OOM ---
+    int preflightN = getInt(cli, "preflightN", 5); // 0 = disattivo
+    int preflightMinHeadroomMb = getInt(cli, "preflightMinHeadroomMb", 1500); // 0 = disattivo
+    boolean skipOnOom = getBool(cli, "skipOnOom", true);
+
     // --- filtro opzionale: considera solo repo elencate in un file (uno per riga) ---
     String onlyFromPath = cli.get("onlyFrom");
-    final Set<String> allowRepos = (onlyFromPath == null ||
-        onlyFromPath.isBlank())
+    final Set<String> allowRepos = (onlyFromPath == null || onlyFromPath.isBlank())
       ? Set.of()
       : loadRepoFilter(Paths.get(onlyFromPath));
     if (!allowRepos.isEmpty()) {
-      System.out.println(
-        "Filtro onlyFrom attivo: " + allowRepos.size() + " repo"
-      );
+      System.out.println("Filtro onlyFrom attivo: " + allowRepos.size() + " repo");
     }
 
     if (!split) {
@@ -93,23 +97,17 @@ public final class AnalyzerApp {
 
       OpenOption[] outOpts = append
         ? new OpenOption[] {
-          StandardOpenOption.CREATE,
-          StandardOpenOption.WRITE,
-          StandardOpenOption.APPEND,
-        }
+            StandardOpenOption.CREATE,
+            StandardOpenOption.WRITE,
+            StandardOpenOption.APPEND,
+          }
         : new OpenOption[] {
-          StandardOpenOption.CREATE,
-          StandardOpenOption.TRUNCATE_EXISTING,
-          StandardOpenOption.WRITE,
-        };
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE,
+          };
 
-      try (
-        BufferedWriter out = Files.newBufferedWriter(
-          outArg,
-          StandardCharsets.UTF_8,
-          outOpts
-        )
-      ) {
+      try (BufferedWriter out = Files.newBufferedWriter(outArg, StandardCharsets.UTF_8, outOpts)) {
         for (Path module : findMavenModules(baseDir)) {
           String repo = repoName(baseDir, module);
           if (!allowRepos.isEmpty() && !allowRepos.contains(repo)) {
@@ -137,7 +135,10 @@ public final class AnalyzerApp {
             autoBatchHuge,
             autoVisitedBig,
             autoVisitedHuge,
-            autoFastHeuristic
+            autoFastHeuristic,
+            preflightN,
+            preflightMinHeadroomMb,
+            skipOnOom
           );
         }
       }
@@ -157,23 +158,17 @@ public final class AnalyzerApp {
         boolean doAppend = append || seenRepos.contains(repo);
         OpenOption[] outOpts = doAppend
           ? new OpenOption[] {
-            StandardOpenOption.CREATE,
-            StandardOpenOption.WRITE,
-            StandardOpenOption.APPEND,
-          }
+              StandardOpenOption.CREATE,
+              StandardOpenOption.WRITE,
+              StandardOpenOption.APPEND,
+            }
           : new OpenOption[] {
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING,
-            StandardOpenOption.WRITE,
-          };
+              StandardOpenOption.CREATE,
+              StandardOpenOption.TRUNCATE_EXISTING,
+              StandardOpenOption.WRITE,
+            };
 
-        try (
-          BufferedWriter out = Files.newBufferedWriter(
-            repoOut,
-            StandardCharsets.UTF_8,
-            outOpts
-          )
-        ) {
+        try (BufferedWriter out = Files.newBufferedWriter(repoOut, StandardCharsets.UTF_8, outOpts)) {
           analyzeModule(
             baseDir,
             module,
@@ -195,7 +190,10 @@ public final class AnalyzerApp {
             autoBatchHuge,
             autoVisitedBig,
             autoVisitedHuge,
-            autoFastHeuristic
+            autoFastHeuristic,
+            preflightN,
+            preflightMinHeadroomMb,
+            skipOnOom
           );
         }
         seenRepos.add(repo);
@@ -228,28 +226,24 @@ public final class AnalyzerApp {
     int autoBatchHuge,
     int autoVisitedBig,
     int autoVisitedHuge,
-    boolean autoFastHeuristic
+    boolean autoFastHeuristic,
+    int preflightN,
+    int preflightMinHeadroomMb,
+    boolean skipOnOom
   ) throws Exception {
     System.out.println("Modulo: " + baseDir.relativize(module));
 
     // --- input (classi prod/test + eventuali JAR trovati) ---
     ModuleInputs inputs = resolveInputsForModule(module);
-    if (
-      !Files.isDirectory(inputs.prodClasses) ||
-      !Files.isDirectory(inputs.testClasses)
-    ) {
+    if (!Files.isDirectory(inputs.prodClasses) || !Files.isDirectory(inputs.testClasses)) {
       System.out.println("   (skip: mancano classi prod/test)");
       return;
     }
 
     // Warmup view (senza JAR per velocità) per scoprire i test
     List<AnalysisInputLocation> warmupLocs = new ArrayList<>();
-    warmupLocs.add(
-      new JavaClassPathAnalysisInputLocation(inputs.prodClasses.toString())
-    );
-    warmupLocs.add(
-      new JavaClassPathAnalysisInputLocation(inputs.testClasses.toString())
-    );
+    warmupLocs.add(new JavaClassPathAnalysisInputLocation(inputs.prodClasses.toString()));
+    warmupLocs.add(new JavaClassPathAnalysisInputLocation(inputs.testClasses.toString()));
     warmupLocs.add(new JrtFileSystemAnalysisInputLocation());
     JavaView warmupView = new JavaView(warmupLocs);
 
@@ -271,6 +265,25 @@ public final class AnalyzerApp {
       return;
     }
 
+    // repoName (serve già dal preflight in poi)
+    String repoName = repoName(baseDir, module);
+
+    // --- PRE-FLIGHT: mini call-graph + controllo headroom ---
+    if (preflightN > 0) {
+      int totalClasses = projectAllClasses.size();
+      boolean ok = preflightOk(
+        warmupView,
+        testMethods,
+        Math.min(preflightN, testMethods.size()),
+        preflightMinHeadroomMb
+      );
+      if (!ok) {
+        System.out.println("   skip: preflight fallito (headroom insufficiente o errore)");
+        recordSkip(repoName, module, "preflight-failed", testMethods.size(), totalClasses);
+        return;
+      }
+    }
+
     // --- AUTO-TUNING per moduli grandi ---
     int effBatchSize = batchSize;
     int effMaxVisited = maxVisited;
@@ -288,10 +301,7 @@ public final class AnalyzerApp {
         fastMode = autoFastHeuristic;
         System.out.printf(
           "   autoTune: HUGE module (%d tests) → batch=%d, maxVisited=%d, fast=%s%n",
-          nTests,
-          effBatchSize,
-          effMaxVisited,
-          String.valueOf(fastMode)
+          nTests, effBatchSize, effMaxVisited, String.valueOf(fastMode)
         );
       } else if (nTests >= bigThr) {
         effBatchSize = Math.max(batchSize, autoBatchBig);
@@ -300,9 +310,7 @@ public final class AnalyzerApp {
         effUseJars = false;
         System.out.printf(
           "   autoTune: BIG module (%d tests) → batch=%d, maxVisited=%d%n",
-          nTests,
-          effBatchSize,
-          effMaxVisited
+          nTests, effBatchSize, effMaxVisited
         );
       }
     }
@@ -314,30 +322,19 @@ public final class AnalyzerApp {
       System.out.println("   (noJars) dipendenze (jar) ignorate");
     } else {
       List<Path> jars = inputs.dependencyJars;
-      if (
-        ignoreJarsIfTestsOverParam >= 0 &&
-        testMethods.size() > ignoreJarsIfTestsOverParam
-      ) {
-        System.out.println(
-          "   (useJars) ignorati perché tests > " + ignoreJarsIfTestsOverParam
-        );
+      if (ignoreJarsIfTestsOverParam >= 0 && testMethods.size() > ignoreJarsIfTestsOverParam) {
+        System.out.println("   (useJars) ignorati perché tests > " + ignoreJarsIfTestsOverParam);
         effectiveJars = List.of();
       } else if (maxJarsCapParam >= 0 && jars.size() > maxJarsCapParam) {
         effectiveJars = jars.subList(0, maxJarsCapParam);
-        System.out.println(
-          "   (useJars) cap JAR: " + effectiveJars.size() + "/" + jars.size()
-        );
+        System.out.println("   (useJars) cap JAR: " + effectiveJars.size() + "/" + jars.size());
       } else {
         effectiveJars = jars;
         if (!effectiveJars.isEmpty()) {
-          System.out.println(
-            "   (useJars) dipendenze (jar): " + effectiveJars.size()
-          );
+          System.out.println("   (useJars) dipendenze (jar): " + effectiveJars.size());
         }
       }
     }
-
-    String repoName = repoName(baseDir, module);
 
     // ====== CONFIG-ID per il resume (con parametri EFFETTIVI) ======
     String cfgId = String.format(
@@ -350,9 +347,7 @@ public final class AnalyzerApp {
       effBatchSize,
       fastMode ? "-F" : ""
     );
-    Path progressFile = module
-      .resolve("target")
-      .resolve("analyzer-progress-" + cfgId + ".txt");
+    Path progressFile = module.resolve("target").resolve("analyzer-progress-" + cfgId + ".txt");
     if (resumeReset) {
       try {
         Files.deleteIfExists(progressFile);
@@ -367,30 +362,20 @@ public final class AnalyzerApp {
         .stream()
         .filter(tm -> {
           MethodSignature s = tm.getSignature();
-          String key =
-            s.getDeclClassType().getFullyQualifiedName() +
-            "#" +
-            s.getSubSignature();
+          String key = s.getDeclClassType().getFullyQualifiedName() + "#" + s.getSubSignature();
           return !alreadyDone.contains(key);
         })
         .collect(Collectors.toList());
       System.out.printf(
         "   resume: %d già fatti, %d da fare (cfgId=%s)%n",
-        (before - testMethods.size()),
-        testMethods.size(),
-        cfgId
+        (before - testMethods.size()), testMethods.size(), cfgId
       );
     } else if (resume) {
-      System.out.printf(
-        "   resume: nessun progresso precedente (cfgId=%s)%n",
-        cfgId
-      );
+      System.out.printf("   resume: nessun progresso precedente (cfgId=%s)%n", cfgId);
     }
 
     // tuning stampato
-    System.out.println(
-      String.format("   Test methods: %d", testMethods.size())
-    );
+    System.out.println(String.format("   Test methods: %d", testMethods.size()));
     System.out.println(
       String.format(
         "   tuning: batchSize=%d, maxDepth=%d, maxVisited=%d%s%s%s",
@@ -417,9 +402,7 @@ public final class AnalyzerApp {
           Files.createDirectories(progressFile.getParent());
           if (!Files.exists(progressFile)) Files.createFile(progressFile);
         } catch (Exception e) {
-          System.out.println(
-            "   (warn) impossibile preparare progress file: " + e.getMessage()
-          );
+          System.out.println("   (warn) impossibile preparare progress file: " + e.getMessage());
         }
       }
 
@@ -467,12 +450,8 @@ public final class AnalyzerApp {
 
     // batching
     final int totalTests = testMethods.size();
-    final int totalBatches = (int) Math.ceil(
-      totalTests / (double) effBatchSize
-    );
-    final int groups = (effBatchesPerView <= 0)
-      ? 1
-      : (int) Math.ceil(totalBatches / (double) effBatchesPerView);
+    final int totalBatches = (int) Math.ceil(totalTests / (double) effBatchSize);
+    final int groups = (effBatchesPerView <= 0) ? 1 : (int) Math.ceil(totalBatches / (double) effBatchesPerView);
 
     // Apri il writer del progress in append (lo useremo dopo ogni test)
     if (resume) {
@@ -480,27 +459,19 @@ public final class AnalyzerApp {
         Files.createDirectories(progressFile.getParent());
         if (!Files.exists(progressFile)) Files.createFile(progressFile);
       } catch (Exception e) {
-        System.out.println(
-          "   (warn) impossibile preparare progress file: " + e.getMessage()
-        );
+        System.out.println("   (warn) impossibile preparare progress file: " + e.getMessage());
       }
     }
 
     // ciclo per gruppi: ricreiamo la view per limitare uso heap (o 1 sola se batchesPerView=0)
     for (int g = 0; g < groups; g++) {
       int firstBatch = (effBatchesPerView <= 0) ? 0 : g * effBatchesPerView;
-      int lastBatchExcl = (effBatchesPerView <= 0)
-        ? totalBatches
-        : Math.min((g + 1) * effBatchesPerView, totalBatches);
+      int lastBatchExcl = (effBatchesPerView <= 0) ? totalBatches : Math.min((g + 1) * effBatchesPerView, totalBatches);
 
       // crea view per questo gruppo
       List<AnalysisInputLocation> locs = new ArrayList<>();
-      locs.add(
-        new JavaClassPathAnalysisInputLocation(inputs.prodClasses.toString())
-      );
-      locs.add(
-        new JavaClassPathAnalysisInputLocation(inputs.testClasses.toString())
-      );
+      locs.add(new JavaClassPathAnalysisInputLocation(inputs.prodClasses.toString()));
+      locs.add(new JavaClassPathAnalysisInputLocation(inputs.testClasses.toString()));
       for (Path jar : effectiveJars) {
         locs.add(new JavaClassPathAnalysisInputLocation(jar.toString()));
       }
@@ -513,25 +484,15 @@ public final class AnalyzerApp {
           int endIdx = Math.min(startIdx + effBatchSize, totalTests);
 
           // log batch + memoria
-          long usedMB =
-            (Runtime.getRuntime().totalMemory() -
-              Runtime.getRuntime().freeMemory()) /
-            (1024 * 1024);
+          long usedMB = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / (1024 * 1024);
           long maxMB = Runtime.getRuntime().maxMemory() / (1024 * 1024);
-          System.out.printf(
-            "   batch %d/%d [%d..%d)%n",
-            (b + 1),
-            totalBatches,
-            startIdx,
-            endIdx
-          );
+          System.out.printf("   batch %d/%d [%d..%d)%n", (b + 1), totalBatches, startIdx, endIdx);
           System.out.printf("   mem %d/%d MiB%n", usedMB, maxMB);
 
           List<JavaSootMethod> batch = testMethods.subList(startIdx, endIdx);
 
           // costruisci il call graph SOLO per il batch corrente
-          ClassHierarchyAnalysisAlgorithm cha =
-            new ClassHierarchyAnalysisAlgorithm(view);
+          ClassHierarchyAnalysisAlgorithm cha = new ClassHierarchyAnalysisAlgorithm(view);
           List<MethodSignature> entries = new ArrayList<>(batch.size());
           for (JavaSootMethod tm : batch) entries.add(tm.getSignature());
           CallGraph cg = cha.initialize(entries);
@@ -553,35 +514,21 @@ public final class AnalyzerApp {
               effMaxVisited
             );
 
-            List<MethodSignature> projectTargets = distance
-              .keySet()
+            List<MethodSignature> projectTargets = distance.keySet()
               .stream()
-              .filter(ms ->
-                projectProdClasses.contains(
-                  ms.getDeclClassType().getFullyQualifiedName()
-                )
-              )
+              .filter(ms -> projectProdClasses.contains(ms.getDeclClassType().getFullyQualifiedName()))
               .collect(Collectors.toList());
 
-            Optional<MethodSignature> byName = projectTargets
-              .stream()
-              .filter(ms ->
-                ms
-                  .getDeclClassType()
-                  .getFullyQualifiedName()
-                  .endsWith("." + simpleName(candidateFocalClass))
-              )
+            Optional<MethodSignature> byName = projectTargets.stream()
+              .filter(ms -> ms.getDeclClassType().getFullyQualifiedName()
+                .endsWith("." + simpleName(candidateFocalClass)))
               .min(Comparator.comparingInt(distance::get));
 
-            Optional<String> byMinDistanceClass = projectTargets
-              .stream()
+            Optional<String> byMinDistanceClass = projectTargets.stream()
               .collect(
                 Collectors.groupingBy(
                   ms -> ms.getDeclClassType().getFullyQualifiedName(),
-                  Collectors.mapping(
-                    distance::get,
-                    Collectors.minBy(Integer::compareTo)
-                  )
+                  Collectors.mapping(distance::get, Collectors.minBy(Integer::compareTo))
                 )
               )
               .entrySet()
@@ -594,54 +541,34 @@ public final class AnalyzerApp {
               .map(ms -> ms.getDeclClassType().getFullyQualifiedName())
               .orElse(byMinDistanceClass.orElse(candidateFocalClass));
 
-            List<MethodSignature> focalClassMethods = projectTargets
-              .stream()
-              .filter(ms ->
-                ms
-                  .getDeclClassType()
-                  .getFullyQualifiedName()
-                  .equals(focalClassFqn)
-              )
+            List<MethodSignature> focalClassMethods = projectTargets.stream()
+              .filter(ms -> ms.getDeclClassType().getFullyQualifiedName().equals(focalClassFqn))
               .sorted(Comparator.comparingInt(distance::get))
               .collect(Collectors.toList());
 
-            Optional<MethodSignature> focalNonTrivial = focalClassMethods
-              .stream()
+            Optional<MethodSignature> focalNonTrivial = focalClassMethods.stream()
               .filter(ms -> !isTrivialMethod(ms.getSubSignature().toString()))
               .findFirst();
             Optional<MethodSignature> focalMethodSig =
-              focalNonTrivial.isPresent()
-                ? focalNonTrivial
-                : focalClassMethods.stream().findFirst();
+              focalNonTrivial.isPresent() ? focalNonTrivial : focalClassMethods.stream().findFirst();
 
-            Set<String> uniqueProjectClasses = projectTargets
-              .stream()
+            Set<String> uniqueProjectClasses = projectTargets.stream()
               .map(ms -> ms.getDeclClassType().getFullyQualifiedName())
               .collect(Collectors.toSet());
 
             long callsToFocal = focalClassMethods.size();
-            long callsToOtherProjectClasses =
-              projectTargets.size() - callsToFocal;
+            long callsToOtherProjectClasses = projectTargets.size() - callsToFocal;
 
-            long callsToLibraries = distance
-              .keySet()
-              .stream()
-              .filter(
-                ms ->
-                  !projectProdClasses.contains(
-                    ms.getDeclClassType().getFullyQualifiedName()
-                  ) &&
-                  !projectTestClasses.contains(
-                    ms.getDeclClassType().getFullyQualifiedName()
-                  )
+            long callsToLibraries = distance.keySet().stream()
+              .filter(ms ->
+                !projectProdClasses.contains(ms.getDeclClassType().getFullyQualifiedName()) &&
+                !projectTestClasses.contains(ms.getDeclClassType().getFullyQualifiedName())
               )
               .count();
 
             boolean usesMocks = detectMocks(cg, tSig);
 
-            double denominator = projectTargets.isEmpty()
-              ? 1.0
-              : projectTargets.size();
+            double denominator = projectTargets.isEmpty() ? 1.0 : projectTargets.size();
             double raw = callsToOtherProjectClasses / denominator;
             double score = clamp(raw - (usesMocks ? 0.2 : 0.0), 0.0, 1.0);
 
@@ -652,24 +579,15 @@ public final class AnalyzerApp {
             row.put("testClass", testClass);
             row.put("testMethod", testMethod);
             row.put("focalClass", focalClassFqn);
-            row.put(
-              "focalMethod",
-              focalMethodSig.map(MethodSignature::toString).orElse("")
-            );
+            row.put("focalMethod", focalMethodSig.map(MethodSignature::toString).orElse(""));
 
             JSONObject cgStats = new JSONObject();
             cgStats.put("projectCalls", projectTargets.size());
             cgStats.put("callsToFocalClass", callsToFocal);
-            cgStats.put(
-              "callsToOtherProjectClasses",
-              callsToOtherProjectClasses
-            );
+            cgStats.put("callsToOtherProjectClasses", callsToOtherProjectClasses);
             cgStats.put("callsToLibraries", callsToLibraries);
             cgStats.put("uniqueProjectClasses", uniqueProjectClasses.size());
-            cgStats.put(
-              "maxDepthVisited",
-              distance.values().stream().mapToInt(i -> i).max().orElse(0)
-            );
+            cgStats.put("maxDepthVisited", distance.values().stream().mapToInt(i -> i).max().orElse(0));
             row.put("cgStats", cgStats);
 
             row.put("usesMocks", usesMocks);
@@ -693,21 +611,21 @@ public final class AnalyzerApp {
           Path ooms = Paths.get("oom-modules.txt");
           Files.writeString(
             ooms,
-            String.format(
-              Locale.ROOT,
-              "%s %s group=%d cfg=%s%n",
-              repoName,
-              module.toString(),
-              g,
-              cfgId
-            ),
+            String.format(Locale.ROOT, "%s %s group=%d cfg=%s%n", repoName, module.toString(), g, cfgId),
             StandardCharsets.UTF_8,
-            Files.exists(ooms)
-              ? StandardOpenOption.APPEND
-              : StandardOpenOption.CREATE
+            Files.exists(ooms) ? StandardOpenOption.APPEND : StandardOpenOption.CREATE
           );
         } catch (Exception ignored) {}
-        throw oom; // ripropaga
+
+        System.out.println("   OOM → skip modulo e continuo con il prossimo.");
+        recordSkip(repoName, module, "oom", testMethods.size(), projectAllClasses.size());
+
+        if (skipOnOom) {
+          System.gc();
+          return; // skippa modulo e prosegue
+        } else {
+          throw oom; // comportamento precedente
+        }
       } finally {
         System.gc();
       }
@@ -757,13 +675,7 @@ public final class AnalyzerApp {
     if (v == null) v = System.getenv(envKey);
     if (v == null) return def;
     v = v.trim().toLowerCase(Locale.ROOT);
-    return (
-      v.isEmpty() ||
-      v.equals("1") ||
-      v.equals("true") ||
-      v.equals("yes") ||
-      v.equals("y")
-    );
+    return (v.isEmpty() || v.equals("1") || v.equals("true") || v.equals("yes") || v.equals("y"));
   }
 
   private static int getIntOpt(String sysKey, String envKey, int def) {
@@ -779,35 +691,18 @@ public final class AnalyzerApp {
 
   // ---------------- helpers: FS/Repo ----------------
 
-  private record ModuleInputs(
-    Path prodClasses,
-    Path testClasses,
-    List<Path> dependencyJars
-  ) {}
+  private record ModuleInputs(Path prodClasses, Path testClasses, List<Path> dependencyJars) {}
 
   private static List<Path> findMavenModules(Path base) throws IOException {
-    final Set<String> SKIP_DIRS = Set.of(
-      "node_modules",
-      ".git",
-      ".hg",
-      ".svn",
-      "build",
-      "dist",
-      "out"
-    );
+    final Set<String> SKIP_DIRS = Set.of("node_modules", ".git", ".hg", ".svn", "build", "dist", "out");
     List<Path> modules = new ArrayList<>();
 
     Files.walkFileTree(
       base,
       new SimpleFileVisitor<Path>() {
         @Override
-        public FileVisitResult preVisitDirectory(
-          Path dir,
-          BasicFileAttributes attrs
-        ) {
-          String name = dir.getFileName() == null
-            ? ""
-            : dir.getFileName().toString();
+        public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+          String name = dir.getFileName() == null ? "" : dir.getFileName().toString();
           if (SKIP_DIRS.contains(name)) return FileVisitResult.SKIP_SUBTREE;
           if (attrs.isSymbolicLink()) return FileVisitResult.SKIP_SUBTREE;
           return FileVisitResult.CONTINUE;
@@ -817,12 +712,8 @@ public final class AnalyzerApp {
         public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
           if ("pom.xml".equals(file.getFileName().toString())) {
             Path module = file.getParent();
-            boolean hasProd = Files.isDirectory(
-              module.resolve("target").resolve("classes")
-            );
-            boolean hasTest = Files.isDirectory(
-              module.resolve("target").resolve("test-classes")
-            );
+            boolean hasProd = Files.isDirectory(module.resolve("target").resolve("classes"));
+            boolean hasTest = Files.isDirectory(module.resolve("target").resolve("test-classes"));
             if (hasProd && hasTest) modules.add(module);
           }
           return FileVisitResult.CONTINUE;
@@ -830,12 +721,7 @@ public final class AnalyzerApp {
 
         @Override
         public FileVisitResult visitFileFailed(Path file, IOException exc) {
-          System.out.println(
-            "   (skip path problem) " +
-            file +
-            " -> " +
-            exc.getClass().getSimpleName()
-          );
+          System.out.println("   (skip path problem) " + file + " -> " + exc.getClass().getSimpleName());
           return FileVisitResult.CONTINUE;
         }
       }
@@ -844,8 +730,7 @@ public final class AnalyzerApp {
     return modules;
   }
 
-  private static ModuleInputs resolveInputsForModule(Path module)
-    throws IOException {
+  private static ModuleInputs resolveInputsForModule(Path module) throws IOException {
     Path prod = module.resolve("target").resolve("classes");
     Path test = module.resolve("target").resolve("test-classes");
 
@@ -855,25 +740,18 @@ public final class AnalyzerApp {
     if (Files.isRegularFile(cp)) {
       int before = jarSet.size();
       for (String line : Files.readAllLines(cp, StandardCharsets.UTF_8)) {
-        String[] entries = line.split(
-          java.util.regex.Pattern.quote(File.pathSeparator)
-        );
+        String[] entries = line.split(java.util.regex.Pattern.quote(File.pathSeparator));
         for (String raw : entries) {
           String entry = raw.trim().replace("\"", "");
           if (entry.isEmpty() || !entry.endsWith(".jar")) continue;
           Path p = Paths.get(entry);
-          if (!p.isAbsolute()) p = module
-            .resolve(p)
-            .toAbsolutePath()
-            .normalize();
+          if (!p.isAbsolute()) p = module.resolve(p).toAbsolutePath().normalize();
           if (Files.isRegularFile(p)) jarSet.add(p);
         }
       }
       System.out.println("   dipendenze (jar): " + (jarSet.size() - before));
     } else {
-      System.out.println(
-        "   (nota) nessun classpath.txt trovato ? si procede lo stesso."
-      );
+      System.out.println("   (nota) nessun classpath.txt trovato ? si procede lo stesso.");
       Path depDir = module.resolve("target").resolve("dependency");
       if (Files.isDirectory(depDir)) {
         int before = jarSet.size();
@@ -881,10 +759,7 @@ public final class AnalyzerApp {
           s.filter(p -> p.toString().endsWith(".jar")).forEach(jarSet::add);
         }
         if (jarSet.size() > before) {
-          System.out.println(
-            "   dipendenze (jar) trovate in target/dependency: " +
-            (jarSet.size() - before)
-          );
+          System.out.println("   dipendenze (jar) trovate in target/dependency: " + (jarSet.size() - before));
         }
       }
     }
@@ -894,9 +769,7 @@ public final class AnalyzerApp {
 
   private static String repoName(Path baseDir, Path module) {
     Path rel = baseDir.relativize(module);
-    return rel.getNameCount() > 0
-      ? rel.getName(0).toString()
-      : module.getFileName().toString();
+    return rel.getNameCount() > 0 ? rel.getName(0).toString() : module.getFileName().toString();
   }
 
   private static Set<String> loadProgress(Path progressFile) {
@@ -908,9 +781,7 @@ public final class AnalyzerApp {
         .filter(s -> !s.isBlank())
         .collect(Collectors.toCollection(LinkedHashSet::new));
     } catch (IOException e) {
-      System.out.println(
-        "   (warn) impossibile leggere progress: " + e.getMessage()
-      );
+      System.out.println("   (warn) impossibile leggere progress: " + e.getMessage());
       return new HashSet<>();
     }
   }
@@ -925,9 +796,7 @@ public final class AnalyzerApp {
         StandardOpenOption.APPEND
       );
     } catch (IOException e) {
-      System.out.println(
-        "   (warn) progress append fallito: " + e.getMessage()
-      );
+      System.out.println("   (warn) progress append fallito: " + e.getMessage());
     }
   }
 
@@ -967,9 +836,7 @@ public final class AnalyzerApp {
   private static String guessFocalClassFromTestName(String testClassFqn) {
     int lastDot = testClassFqn.lastIndexOf('.');
     String pkg = lastDot >= 0 ? testClassFqn.substring(0, lastDot) : "";
-    String simple = lastDot >= 0
-      ? testClassFqn.substring(lastDot + 1)
-      : testClassFqn;
+    String simple = lastDot >= 0 ? testClassFqn.substring(lastDot + 1) : testClassFqn;
     String base = simple
       .replaceFirst("^(Test)+", "")
       .replaceFirst("(Test|Tests|IT|IntTest)$", "");
@@ -993,23 +860,11 @@ public final class AnalyzerApp {
   private static boolean isTrivialMethod(String subSig) {
     String name = methodNameFromSubSig(subSig);
     if (name.equals("<init>") || name.equals("<clinit>")) return true;
+    if (name.equals("toString") || name.equals("equals") || name.equals("hashCode") || name.equals("close") || name.equals("finalize")) return true;
     if (
-      name.equals("toString") ||
-      name.equals("equals") ||
-      name.equals("hashCode") ||
-      name.equals("close") ||
-      name.equals("finalize")
-    ) return true;
-    if (
-      (name.startsWith("get") &&
-        name.length() >= 4 &&
-        Character.isUpperCase(name.charAt(3))) ||
-      (name.startsWith("set") &&
-        name.length() >= 4 &&
-        Character.isUpperCase(name.charAt(3))) ||
-      (name.startsWith("is") &&
-        name.length() >= 3 &&
-        Character.isUpperCase(name.charAt(2)))
+      (name.startsWith("get") && name.length() >= 4 && Character.isUpperCase(name.charAt(3))) ||
+      (name.startsWith("set") && name.length() >= 4 && Character.isUpperCase(name.charAt(3))) ||
+      (name.startsWith("is") && name.length() >= 3 && Character.isUpperCase(name.charAt(2)))
     ) {
       return true;
     }
@@ -1036,44 +891,81 @@ public final class AnalyzerApp {
       int d = dist.get(u);
       if (d >= maxDepth) continue;
 
-      boolean uIsProject = projectAllClasses.contains(
-        u.getDeclClassType().getFullyQualifiedName()
-      );
+      boolean uIsProject = projectAllClasses.contains(u.getDeclClassType().getFullyQualifiedName());
       if (pruneLibs && !uIsProject && d >= 1) continue;
 
-      cg
-        .callsFrom(u)
-        .forEach(call -> {
-          MethodSignature v = call.getTargetMethodSignature();
-          if (!dist.containsKey(v)) {
-            dist.put(v, d + 1);
-            if (dist.size() < maxVisited) q.add(v);
-          }
-        });
+      cg.callsFrom(u).forEach(call -> {
+        MethodSignature v = call.getTargetMethodSignature();
+        if (!dist.containsKey(v)) {
+          dist.put(v, d + 1);
+          if (dist.size() < maxVisited) q.add(v);
+        }
+      });
     }
     return dist;
   }
 
   private static boolean detectMocks(CallGraph cg, MethodSignature test) {
-    return cg
-      .callsFrom(test)
-      .stream()
-      .anyMatch(call -> {
-        String fqn = call
-          .getTargetMethodSignature()
-          .getDeclClassType()
-          .getFullyQualifiedName();
-        return (
-          fqn.startsWith("org.mockito.") ||
-          fqn.startsWith("org.easymock.") ||
-          fqn.startsWith("org.powermock.") ||
-          fqn.startsWith("io.mockk.")
-        );
-      });
+    return cg.callsFrom(test).stream().anyMatch(call -> {
+      String fqn = call.getTargetMethodSignature().getDeclClassType().getFullyQualifiedName();
+      return (
+        fqn.startsWith("org.mockito.") ||
+        fqn.startsWith("org.easymock.") ||
+        fqn.startsWith("org.powermock.") ||
+        fqn.startsWith("io.mockk.")
+      );
+    });
   }
 
   private static double clamp(double x, double lo, double hi) {
     return Math.max(lo, Math.min(hi, x));
+  }
+
+  // --- nuovi helper: preflight/oom-skip logging ---
+
+  private static boolean preflightOk(
+    JavaView view,
+    List<JavaSootMethod> tests,
+    int n,
+    int minHeadroomMb
+  ) {
+    long headroomBefore = headroomMb();
+    try {
+      ClassHierarchyAnalysisAlgorithm cha = new ClassHierarchyAnalysisAlgorithm(view);
+      List<MethodSignature> entries = new ArrayList<>(n);
+      for (int i = 0; i < n; i++) entries.add(tests.get(i).getSignature());
+      CallGraph cg = cha.initialize(entries);
+      if (!entries.isEmpty()) {
+        // Piccola materializzazione
+        cg.callsFrom(entries.get(0)).stream().limit(3).count();
+      }
+    } catch (Throwable t) {
+      return false; // include OOM/Errors
+    }
+    long headroomNow = Math.min(headroomBefore, headroomMb());
+    return minHeadroomMb <= 0 || headroomNow >= minHeadroomMb;
+  }
+
+  private static long headroomMb() {
+    Runtime rt = Runtime.getRuntime();
+    long used = rt.totalMemory() - rt.freeMemory();
+    long max = rt.maxMemory();
+    return (max - used) / (1024L * 1024L);
+  }
+
+  private static void recordSkip(String repo, Path module, String reason, int tests, int classes) {
+    try {
+      Path f = Paths.get("skipped-modules.txt");
+      String line = String.format(
+        Locale.ROOT,
+        "%s\t%s\treason=%s\ttests=%d\tclasses=%d%n",
+        repo, module.toString(), reason, tests, classes
+      );
+      Files.writeString(
+        f, line, StandardCharsets.UTF_8,
+        Files.exists(f) ? StandardOpenOption.APPEND : StandardOpenOption.CREATE
+      );
+    } catch (Exception ignored) {}
   }
 
   // NEW: carica elenco repo consentite da file (uno per riga). Accetta repoName, path o URL.
@@ -1086,18 +978,12 @@ public final class AnalyzerApp {
         .filter(s -> !s.startsWith("#"))
         .map(s -> {
           String t = s.replace('\\', '/');
-          String last = t.contains("/")
-            ? t.substring(t.lastIndexOf('/') + 1)
-            : t;
-          return last.endsWith(".git")
-            ? last.substring(0, last.length() - 4)
-            : last;
+          String last = t.contains("/") ? t.substring(t.lastIndexOf('/') + 1) : t;
+          return last.endsWith(".git") ? last.substring(0, last.length() - 4) : last;
         })
         .collect(Collectors.toCollection(LinkedHashSet::new));
     } catch (Exception e) {
-      System.err.println(
-        "Impossibile leggere onlyFrom: " + file + " → " + e.getMessage()
-      );
+      System.err.println("Impossibile leggere onlyFrom: " + file + " → " + e.getMessage());
       return Set.of();
     }
   }
