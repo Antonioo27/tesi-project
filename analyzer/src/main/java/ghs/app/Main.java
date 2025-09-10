@@ -63,6 +63,6 @@ public final class Main {
     pipeline.run(Paths.get(cfg.baseDir()));
     out.close();
 
-    System.out.println("\n✅ Analisi completata.");
+    System.out.println("\nAnalisi completata.");
   }
 }

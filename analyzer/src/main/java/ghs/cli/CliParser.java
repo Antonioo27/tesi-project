@@ -20,6 +20,9 @@ public final class CliParser {
     boolean splitByRepo = getBool(m, "splitByRepo", false);
     boolean useJars = getBool(m, "useJars", false);
     int batchSize = getInt(m, "batchSize", 50);
+    int preflightN = getInt(m, "preflightN", 5); // come in AnalyzerApp
+    int preflightMinHeadroomMb = getInt(m, "preflightMinHeadroomMb", 1500);
+    boolean skipOnOom = getBool(m, "skipOnOom", true);
 
     boolean resume = m.containsKey("resume")
       ? getBool(m, "resume", true)
@@ -82,7 +85,10 @@ public final class CliParser {
       autoVisitedBig,
       autoVisitedHuge,
       autoFastHeuristic,
-      onlyFrom
+      onlyFrom,
+      preflightN,
+      preflightMinHeadroomMb,
+      skipOnOom
     );
   }
 

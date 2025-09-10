@@ -6,8 +6,12 @@ import ghs.analyzer.heuristics.*;
 import ghs.analyzer.model.*;
 import ghs.analyzer.sootupview.ViewFactory;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.Files;
+import java.io.File;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;     // se usi Files.list senza FQCN
 import sootup.callgraph.CallGraph;
 import sootup.callgraph.ClassHierarchyAnalysisAlgorithm;
 import sootup.core.inputlocation.AnalysisInputLocation;
@@ -56,8 +60,8 @@ public final class FullCallGraphStrategy implements AnalyzerStrategy {
     ProjectIndex idx,
     AnalysisConfig cfg
   ) throws Exception {
-    // Crea view con prod/test + eventuali JAR
     List<AnalysisInputLocation> locs = new ArrayList<>();
+    // prod + test
     locs.add(
       new JavaClassPathAnalysisInputLocation(
         module.resolve("target/classes").toString()
@@ -68,14 +72,23 @@ public final class FullCallGraphStrategy implements AnalyzerStrategy {
         module.resolve("target/test-classes").toString()
       )
     );
+
+    // JAR di dipendenze (se richiesti)
     if (cfg.useJars()) {
-      // NB: la selezione dei JAR viene fatta a monte nel ModuleAnalyzer, qui potresti ricevere un elenco già filtrato se necessario
-      // In questa versione minimale lasciamo alla View l'aggiunta eventuale (estendibile)
+      List<Path> jars = findDependencyJars(module);
+      if (cfg.maxJars() >= 0 && jars.size() > cfg.maxJars()) {
+        jars = jars.subList(0, cfg.maxJars());
+      }
+      for (Path jar : jars) {
+        locs.add(new JavaClassPathAnalysisInputLocation(jar.toString()));
+      }
     }
+
+    // JDK
     locs.add(new JrtFileSystemAnalysisInputLocation());
+
     JavaView view = viewFactory.create(locs);
 
-    // Build CG per il batch
     ClassHierarchyAnalysisAlgorithm cha = new ClassHierarchyAnalysisAlgorithm(
       view
     );
@@ -113,5 +126,42 @@ public final class FullCallGraphStrategy implements AnalyzerStrategy {
     }
     System.gc();
     return results;
+  }
+
+  // ===== helper locale =====
+  private static List<Path> findDependencyJars(Path module) {
+    List<Path> out = new ArrayList<>();
+    Path cp = module.resolve("target").resolve("classpath.txt");
+
+    try {
+      if (Files.isRegularFile(cp)) {
+        for (String line : Files.readAllLines(
+          cp,
+          java.nio.charset.StandardCharsets.UTF_8
+        )) {
+          for (String raw : line.split(
+            java.util.regex.Pattern.quote(File.pathSeparator)
+          )) {
+            String entry = raw.trim().replace("\"", "");
+            if (entry.endsWith(".jar")) {
+              Path p = Paths.get(entry);
+              if (!p.isAbsolute()) p = module
+                .resolve(p)
+                .toAbsolutePath()
+                .normalize();
+              if (Files.isRegularFile(p)) out.add(p);
+            }
+          }
+        }
+      } else {
+        Path depDir = module.resolve("target").resolve("dependency");
+        if (Files.isDirectory(depDir)) {
+          try (java.util.stream.Stream<Path> s = Files.list(depDir)) {
+            s.filter(p -> p.toString().endsWith(".jar")).forEach(out::add);
+          }
+        }
+      }
+    } catch (Exception ignored) {}
+    return out;
   }
 }

@@ -18,6 +18,7 @@ target/
 
 **/out/
 
+*.jsonl
 
 # File di sistema
 .DS_Store

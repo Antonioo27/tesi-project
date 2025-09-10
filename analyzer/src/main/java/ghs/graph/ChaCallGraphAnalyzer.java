@@ -2,6 +2,8 @@ package ghs.analyzer.graph;
 
 import ghs.analyzer.heuristics.*;
 import ghs.analyzer.model.*;
+import java.nio.file.Path;  
+import sootup.callgraph.CallGraph;        
 import java.util.*;
 import java.util.stream.Collectors;
 import sootup.core.signatures.MethodSignature;
@@ -26,9 +28,9 @@ public final class ChaCallGraphAnalyzer implements CallGraphAnalyzer {
   @Override
   public TestRecord analyzeOne(
     String repoName,
-    java.nio.file.Path module,
+    Path module,
     String cfgId,
-    sootup.callgraph.CallGraph cg,
+    CallGraph cg,
     JavaSootMethod tm,
     Set<String> projectProdClasses,
     Set<String> projectTestClasses,

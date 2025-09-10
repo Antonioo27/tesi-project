@@ -55,6 +55,7 @@ public final class ModuleAnalyzer {
   }
 
   /** Punto di ingresso per l'analisi di un modulo specifico. */
+  /** Punto di ingresso per l'analisi di un modulo specifico. */
   public void analyzeModule(Path baseDir, Path module, AnalysisConfig cfg)
     throws Exception {
     System.out.println("Modulo: " + baseDir.relativize(module));
@@ -85,12 +86,55 @@ public final class ModuleAnalyzer {
       return;
     }
 
-    // 5) Auto-tuning per dimensione modulo
+    // 5) Preflight (mini-CHA + controllo headroom)
+    if (cfg.preflightN() > 0) {
+      boolean ok = preflightOk(
+        warmupView,
+        testMethods,
+        Math.min(cfg.preflightN(), testMethods.size()),
+        cfg.preflightMinHeadroomMb()
+      );
+      if (!ok) {
+        String repoName = PathUtil.repoName(baseDir, module);
+        System.out.println(
+          "   skip: preflight fallito (headroom insufficiente o errore)"
+        );
+        recordSkip(
+          repoName,
+          module,
+          "preflight-failed",
+          testMethods.size(),
+          projectAllClasses.size()
+        );
+        return;
+      }
+    }
+
+    // 6) Auto-tuning per dimensione modulo
     Tuning tuning = tune(cfg, testMethods.size());
 
-    // 6) Resume/Progress
+    // 6.1 useJars "effettivo": rispetta anche ignoreJarsIfTestsOver
+    boolean effUseJars = tuning.useJars();
+    if (
+      cfg.ignoreJarsIfTestsOver() >= 0 &&
+      testMethods.size() > cfg.ignoreJarsIfTestsOver()
+    ) {
+      effUseJars = false;
+    }
+
+    // 7) Resume/Progress (cfgId coerente con useJars effettivo)
     String repoName = PathUtil.repoName(baseDir, module);
-    String cfgId = makeCfgId(cfg, tuning);
+    String cfgId = String.format(
+      Locale.ROOT,
+      "d%d-v%d-p%s-j%s-b%d%s",
+      cfg.maxDepth(),
+      tuning.maxVisited(),
+      cfg.pruneLibs() ? "1" : "0",
+      effUseJars ? "1" : "0",
+      tuning.batchSize(),
+      tuning.fastMode() ? "-F" : ""
+    );
+
     if (cfg.resumeReset()) progress.reset(module, cfgId);
     Set<String> already = cfg.resume()
       ? progress.load(module, cfgId)
@@ -121,7 +165,7 @@ public final class ModuleAnalyzer {
       );
     }
 
-    // 7) Log configurazione effettiva
+    // 8) Log configurazione effettiva
     System.out.println("   Test methods: " + testMethods.size());
     System.out.println(
       String.format(
@@ -129,7 +173,7 @@ public final class ModuleAnalyzer {
         tuning.batchSize(),
         cfg.maxDepth(),
         tuning.maxVisited(),
-        tuning.useJars() ? ", jars=*" : "",
+        effUseJars ? ", jars=*" : "",
         tuning.batchesPerView() > 0
           ? (", batchesPerView=" + tuning.batchesPerView())
           : "",
@@ -149,7 +193,7 @@ public final class ModuleAnalyzer {
       projectAllClasses
     );
 
-    // 8) Batching con gruppi (ricreazione view demandata alla strategy FULL)
+    // 9) Batching con gruppi (ricreazione view demandata alla strategy FULL)
     final int total = testMethods.size();
     final int batchSize = tuning.batchSize();
     final int totalBatches = (int) Math.ceil(total / (double) batchSize);
@@ -185,37 +229,44 @@ public final class ModuleAnalyzer {
           System.out.printf("   mem %d/%d MiB%n", usedMB, maxMB);
 
           List<JavaSootMethod> batch = testMethods.subList(startIdx, endIdx);
+
+          // AnalysisConfig derivata con i parametri EFFETTIVI (incluso effUseJars)
+          AnalysisConfig effectiveCfg = new AnalysisConfig(
+            cfg.baseDir(),
+            cfg.outPath(),
+            cfg.maxDepth(),
+            cfg.pruneLibs(),
+            tuning.maxVisited(),
+            batchSize,
+            cfg.splitByRepo(),
+            cfg.append(),
+            effUseJars, // 👈 usa l'uso JAR effettivo
+            cfg.resume(),
+            cfg.resumeReset(),
+            cfg.maxJars(),
+            cfg.ignoreJarsIfTestsOver(),
+            tuning.batchesPerView(),
+            cfg.autoTune(),
+            cfg.bigThr(),
+            cfg.hugeThr(),
+            cfg.autoBatchBig(),
+            cfg.autoBatchHuge(),
+            cfg.autoVisitedBig(),
+            cfg.autoVisitedHuge(),
+            cfg.autoFastHeuristic(),
+            cfg.onlyFromFile(),
+            cfg.preflightN(),
+            cfg.preflightMinHeadroomMb(),
+            cfg.skipOnOom()
+          );
+
           List<TestRecord> results = strategy.analyzeBatch(
             repoName,
             module,
             cfgId,
             batch,
             index,
-            new AnalysisConfig(
-              cfg.baseDir(),
-              cfg.outPath(),
-              cfg.maxDepth(),
-              cfg.pruneLibs(),
-              tuning.maxVisited(),
-              batchSize,
-              cfg.splitByRepo(),
-              cfg.append(),
-              tuning.useJars(),
-              cfg.resume(),
-              cfg.resumeReset(),
-              cfg.maxJars(),
-              cfg.ignoreJarsIfTestsOver(),
-              tuning.batchesPerView(),
-              cfg.autoTune(),
-              cfg.bigThr(),
-              cfg.hugeThr(),
-              cfg.autoBatchBig(),
-              cfg.autoBatchHuge(),
-              cfg.autoVisitedBig(),
-              cfg.autoVisitedHuge(),
-              cfg.autoFastHeuristic(),
-              cfg.onlyFromFile()
-            )
+            effectiveCfg
           );
 
           for (TestRecord r : results) {
@@ -246,7 +297,24 @@ public final class ModuleAnalyzer {
               : StandardOpenOption.CREATE
           );
         } catch (Exception ignored) {}
-        throw oom;
+
+        // Log & skip modulo se richiesto
+        recordSkip(
+          repoName,
+          module,
+          "oom",
+          testMethods.size(),
+          projectAllClasses.size()
+        );
+        if (cfg.skipOnOom()) {
+          System.out.println(
+            "   OOM → skip modulo e continuo con il prossimo."
+          );
+          System.gc();
+          return; // salta questo modulo
+        } else {
+          throw oom; // comportamento precedente
+        }
       } finally {
         System.gc();
       }
@@ -292,6 +360,70 @@ public final class ModuleAnalyzer {
       t.batchSize(),
       t.fastMode() ? "-F" : ""
     );
+  }
+
+  private static boolean preflightOk(
+    sootup.java.core.views.JavaView view,
+    java.util.List<sootup.java.core.JavaSootMethod> tests,
+    int n,
+    int minHeadroomMb
+  ) {
+    long headroomBefore = headroomMb();
+    try {
+      sootup.callgraph.ClassHierarchyAnalysisAlgorithm cha =
+        new sootup.callgraph.ClassHierarchyAnalysisAlgorithm(view);
+      java.util.List<sootup.core.signatures.MethodSignature> entries =
+        new java.util.ArrayList<>(Math.min(n, tests.size()));
+      for (int i = 0; i < Math.min(n, tests.size()); i++) entries.add(
+        tests.get(i).getSignature()
+      );
+      sootup.callgraph.CallGraph cg = cha.initialize(entries);
+      if (!entries.isEmpty()) cg
+        .callsFrom(entries.get(0))
+        .stream()
+        .limit(3)
+        .count();
+    } catch (Throwable t) {
+      return false;
+    }
+    long headroomNow = Math.min(headroomBefore, headroomMb());
+    return minHeadroomMb <= 0 || headroomNow >= minHeadroomMb;
+  }
+
+  private static long headroomMb() {
+    Runtime rt = Runtime.getRuntime();
+    long used = rt.totalMemory() - rt.freeMemory();
+    long max = rt.maxMemory();
+    return (max - used) / (1024L * 1024L);
+  }
+
+  private static void recordSkip(
+    String repo,
+    java.nio.file.Path module,
+    String reason,
+    int tests,
+    int classes
+  ) {
+    try {
+      java.nio.file.Path f = java.nio.file.Paths.get("skipped-modules.txt");
+      String line = String.format(
+        java.util.Locale.ROOT,
+        "%s\t%s\treason=%s\ttests=%d\tclasses=%d%n",
+        repo,
+        module.toString(),
+        reason,
+        tests,
+        classes
+      );
+      java.nio.file.Files.writeString(
+        f,
+        line,
+        java.nio.charset.StandardCharsets.UTF_8,
+        java.nio.file.Files.exists(f)
+          ? java.nio.file.StandardOpenOption.APPEND
+          : java.nio.file.StandardOpenOption.CREATE
+      );
+    } catch (Exception ignored) {}
   }
 
   private static Tuning tune(AnalysisConfig cfg, int nTests) {
