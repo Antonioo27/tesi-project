@@ -55,7 +55,6 @@ public final class ModuleAnalyzer {
   }
 
   /** Punto di ingresso per l'analisi di un modulo specifico. */
-  /** Punto di ingresso per l'analisi di un modulo specifico. */
   public void analyzeModule(Path baseDir, Path module, AnalysisConfig cfg)
     throws Exception {
     System.out.println("Modulo: " + baseDir.relativize(module));
@@ -257,7 +256,10 @@ public final class ModuleAnalyzer {
             cfg.onlyFromFile(),
             cfg.preflightN(),
             cfg.preflightMinHeadroomMb(),
-            cfg.skipOnOom()
+            cfg.skipOnOom(),
+            cfg.integrationMinProjectClasses(),
+            cfg.integrationMinProjectMethods(),
+            cfg.highConcentrationThreshold()
           );
 
           List<TestRecord> results = strategy.analyzeBatch(

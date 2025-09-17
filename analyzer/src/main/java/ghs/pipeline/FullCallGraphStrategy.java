@@ -31,6 +31,7 @@ public final class FullCallGraphStrategy implements AnalyzerStrategy {
   private final MockUsageDetector mocks;
   private final UnitIntegrationScorer scorer;
   private final CallGraphAnalyzer analyzer;
+  private final TestClassifier classifier;
 
   public FullCallGraphStrategy(
     ViewFactory viewFactory,
@@ -39,7 +40,8 @@ public final class FullCallGraphStrategy implements AnalyzerStrategy {
     FocalMethodHeuristic methodHeu,
     BfsTraverser bfs,
     MockUsageDetector mocks,
-    UnitIntegrationScorer scorer
+    UnitIntegrationScorer scorer,
+    TestClassifier classifier
   ) {
     this.viewFactory = viewFactory;
     this.discovery = discovery;
@@ -48,7 +50,8 @@ public final class FullCallGraphStrategy implements AnalyzerStrategy {
     this.bfs = bfs;
     this.mocks = mocks;
     this.scorer = scorer;
-    this.analyzer = new ChaCallGraphAnalyzer(bfs, mocks, scorer);
+    this.analyzer = new ChaCallGraphAnalyzer(bfs, mocks, scorer, classifier);
+    this.classifier = classifier;
   }
 
   @Override

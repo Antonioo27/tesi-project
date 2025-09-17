@@ -29,5 +29,8 @@ public record CliOptions(
   Optional<Path> onlyFrom,
   int preflightN, // 0 = disattivo
   int preflightMinHeadroomMb, // 0 = disattivo
-  boolean skipOnOom // true = salta modulo su OOM
+  boolean skipOnOom, // true = salta modulo su OOM
+  int integrationMinProjectClasses,
+  int integrationMinProjectMethods, // minimum method calls for integration classification
+  double highConcentrationThreshold // threshold for high concentration classification (0.0-1.0)
 ) {}

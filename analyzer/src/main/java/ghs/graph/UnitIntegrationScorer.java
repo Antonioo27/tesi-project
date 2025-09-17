@@ -1,36 +1,42 @@
+// src/main/java/ghs/analyzer/graph/UnitIntegrationScorer.java
 package ghs.analyzer.graph;
 
 public final class UnitIntegrationScorer {
 
-  public double score(
-    int projectTargets,
-    int callsToOtherProjectClasses,
-    boolean usesMocks
-  ) {
-    double denom = projectTargets == 0 ? 1.0 : projectTargets;
-    double raw = callsToOtherProjectClasses / denom;
-    double s = raw - (usesMocks ? 0.2 : 0.0);
+  public static final class Features {
+    public final int directRefsCount;      // # classi progetto dirette (dal classificatore)
+    public final int uniqueProjectClasses; // # classi progetto via BFS
+    public final int maxDepthVisited;      // profondità max via BFS
+    public final boolean usesMocks;        // segnali dai framework mock
+    public final int projectCalls;         // # invocazioni a metodi di classi progetto (via BFS)
+    public final int callsToFocalClass;    // # invocazioni a metodi della focal class (via BFS, 0 se INTEGRATION)
+
+    public Features(int directRefsCount, int uniqueProjectClasses, int maxDepthVisited,
+                    boolean usesMocks, int projectCalls, int callsToFocalClass) {
+      this.directRefsCount = directRefsCount;
+      this.uniqueProjectClasses = uniqueProjectClasses;
+      this.maxDepthVisited = maxDepthVisited;
+      this.usesMocks = usesMocks;
+      this.projectCalls = projectCalls;
+      this.callsToFocalClass = callsToFocalClass;
+    }
+  }
+
+  // Formula semplice, pesi ritarabili:
+  //  ↑ con molte classi dirette / spread / profondità
+  //  ↓ con mock e con forte concentrazione sulla focal class (solo Unit)
+  public double score(Features f) {
+    double denom = f.projectCalls <= 0 ? 1.0 : (double) f.projectCalls;
+    double focalShare = f.callsToFocalClass / denom; // 0..1
+
+    double s = 0.25 * Math.max(0, f.directRefsCount - 1)
+             + 0.15 * Math.max(0, f.uniqueProjectClasses - 1)
+             + 0.10 * Math.max(0, f.maxDepthVisited - 1)
+             - 0.20 * (f.usesMocks ? 1.0 : 0.0)
+             - 0.25 * focalShare;
+
     if (s < 0) s = 0;
     if (s > 1) s = 1;
     return s;
   }
 }
-
-
-/**
- * VERSION 2
- * public double scoreV2(int projectTargets, int callsToOtherProjectClasses,
-                      boolean usesMocks, int uniqueProjectClasses, int maxDepthVisited) {
-  double denom = projectTargets == 0 ? 1.0 : projectTargets;
-  double ratio = callsToOtherProjectClasses / denom;
-
-  double depthPenalty = Math.max(0, maxDepthVisited - 1) * 0.10;         // d=1→0, d=2→0.1, d=3→0.2
-  double spreadPenalty = Math.max(0, uniqueProjectClasses - 1) * 0.05;    // 1 class→0, 3 classi→0.10
-  double mockBonus = usesMocks ? 0.20 : 0.0;
-
-  double s = ratio + depthPenalty + spreadPenalty - mockBonus;
-  if (s < 0) s = 0; if (s > 1) s = 1;
-  return s;
-}
-
- */

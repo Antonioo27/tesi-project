@@ -41,7 +41,9 @@ public final class FastHeuristicStrategy implements AnalyzerStrategy {
           "",
           new CgStats(0, 0, 0, 0, 0, 0),
           false,
-          0.0
+          0.0,
+          TestKind.UNIT,
+          java.util.Collections.emptyList()
         );
       })
       .collect(Collectors.toList());

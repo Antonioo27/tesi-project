@@ -14,11 +14,27 @@ target/
 *.ipr
 *.iws
 
-**/*.txt
+# GitHub copilot instructions
+.github/
 
+# Output files
 **/out/
-
 *.jsonl
+
+# Python analysis scripts (temporary tools)
+*.py
+
+# Batch files (temporary scripts)
+*.bat
+
+# PowerShell scripts
+*.ps1
+
+# JSON files (temporary analysis data)
+*.json
+
+# Text files (logs and temporary data)
+*.txt
 
 # File di sistema
 .DS_Store

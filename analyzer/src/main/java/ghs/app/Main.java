@@ -4,6 +4,8 @@ import ghs.analyzer.cli.*;
 import ghs.analyzer.discovery.*;
 import ghs.analyzer.graph.*;
 import ghs.analyzer.heuristics.*;
+import ghs.analyzer.heuristics.EnhancedHybridTestClassifier;
+import ghs.analyzer.heuristics.TestClassifier;
 import ghs.analyzer.io.*;
 import ghs.analyzer.model.*;
 import ghs.analyzer.pipeline.*;
@@ -28,10 +30,17 @@ public final class Main {
 
     // Heuristics & graph
     FocalClassHeuristic classHeu = new NameBasedFocalClassHeuristic();
-    FocalMethodHeuristic methodHeu = new NameAndDistanceFocalMethodHeuristic();
+    FocalMethodHeuristic methodHeu = new AssertionAwareFocalMethodHeuristic(
+      new NameAndDistanceFocalMethodHeuristic()
+    );
     BfsTraverser bfs = new BfsTraverser();
     MockUsageDetector mocks = new MockUsageDetector();
     UnitIntegrationScorer scorer = new UnitIntegrationScorer();
+    TestClassifier classifier = new EnhancedHybridTestClassifier(
+      cfg.integrationMinProjectClasses(),
+      cfg.integrationMinProjectMethods(),
+      cfg.highConcentrationThreshold()
+    );
 
     // Strategie
     AnalyzerStrategy fast = new FastHeuristicStrategy(classHeu);
@@ -42,7 +51,8 @@ public final class Main {
       methodHeu,
       bfs,
       mocks,
-      scorer
+      scorer,
+      classifier
     );
 
     ModuleAnalyzer moduleAnalyzer = new ModuleAnalyzer(

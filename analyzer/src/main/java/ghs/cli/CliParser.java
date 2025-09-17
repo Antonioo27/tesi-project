@@ -23,6 +23,21 @@ public final class CliParser {
     int preflightN = getInt(m, "preflightN", 5); // come in AnalyzerApp
     int preflightMinHeadroomMb = getInt(m, "preflightMinHeadroomMb", 1500);
     boolean skipOnOom = getBool(m, "skipOnOom", true);
+    int integrationMinProjectClasses = getInt(
+      m,
+      "integrationMinProjectClasses",
+      2
+    );
+    int integrationMinProjectMethods = getInt(
+      m,
+      "integrationMinProjectMethods", 
+      6  // default: 3 * integrationMinProjectClasses
+    );
+    double highConcentrationThreshold = getDouble(
+      m,
+      "highConcentrationThreshold",
+      0.8
+    );
 
     boolean resume = m.containsKey("resume")
       ? getBool(m, "resume", true)
@@ -88,7 +103,10 @@ public final class CliParser {
       onlyFrom,
       preflightN,
       preflightMinHeadroomMb,
-      skipOnOom
+      skipOnOom,
+      integrationMinProjectClasses,
+      integrationMinProjectMethods,
+      highConcentrationThreshold
     );
   }
 
@@ -144,5 +162,13 @@ public final class CliParser {
       return Integer.parseInt(v.trim());
     } catch (Exception ignored) {}
     return getInt(m, k, def);
+  }
+
+  private static double getDouble(Map<String, String> m, String k, double def) {
+    try {
+      return Double.parseDouble(m.getOrDefault(k, String.valueOf(def)).trim());
+    } catch (Exception e) {
+      return def;
+    }
   }
 }

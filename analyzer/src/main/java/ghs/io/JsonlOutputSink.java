@@ -1,6 +1,8 @@
 package ghs.analyzer.io;
 
 import ghs.analyzer.model.*;
+import ghs.analyzer.model.TestRecord;
+
 import java.io.BufferedWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -65,7 +67,9 @@ public final class JsonlOutputSink implements OutputSink {
           .put("maxDepthVisited", r.cgStats().maxDepthVisited())
       )
       .put("usesMocks", r.usesMocks())
-      .put("unit_integration_score", r.unitIntegrationScore());
+      .put("unit_integration_score", r.unitIntegrationScore())
+      .put("testKind", r.testKind())
+      .put("directProjectClasses", new org.json.JSONArray(r.directProjectClasses()));
 
     if (!splitByRepo) {
       writer.write(row.toString());
