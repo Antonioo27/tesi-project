@@ -1,32 +1,20 @@
-# Tesi Project - Advanced Test Classification Analysis# Tesi Project
-
-
+# Tesi Project - Advanced Test Classification Analysis Tesi Project
 
 Questo repository contiene due applicazioni Java sviluppate per il progetto di tesi sull'analisi dei test unitari e di integrazione nei repository Java:Questo repository contiene due applicazioni Java sviluppate per il progetto di tesi:
-
-
 
 - **repo-manager**: applicazione per scaricare repository Maven da SEART e clonarli in batch.- **repo-manager**: applicazione per scaricare repository Maven da SEART e clonarli in batch.
 
 - **analyzer**: applicazione per analizzare i repository scaricati utilizzando tecniche avanzate di classificazione dei test e rilevamento dei metodi focali.- **analyzer**: applicazione per analizzare i repository scaricati.
 
-
-
-## Struttura## Struttura
-
-
+## Struttura Struttura
 
 - `repo-manager/` — Clonazione delle repository- `repo-manager/` — Clonazione delle repository
 
 - `analyzer/` — Analisi del codice con algoritmi avanzati di classificazione dei test- `analyzer/` — Analisi del codice
 
+## Caratteristiche Principali dell'Analyzer Requisiti
 
-
-## Caratteristiche Principali dell'Analyzer## Requisiti
-
-
-
-### 🧪 **Classificazione Avanzata dei Test**Prima di eseguire le applicazioni, è necessario:
+### **Classificazione Avanzata dei Test**Prima di eseguire le applicazioni, è necessario:
 
 - **EnhancedHybridTestClassifier**: Classificazione multi-fattoriale che combina analisi a livello di classe e metodo
 
@@ -36,7 +24,7 @@ Questo repository contiene due applicazioni Java sviluppate per il progetto di t
 
 - Impostare un **token GitHub** per autenticarsi durante il clonaggio dei repository.
 
-### 🎯 **Rilevamento Intelligente dei Metodi Focali**
+### **Rilevamento Intelligente dei Metodi Focali**
 
 - **AssertionAwareFocalMethodHeuristic**: Euristica avanzata che analizza il bytecode per identificare i metodi focali## Come eseguire
 
@@ -46,17 +34,17 @@ Questo repository contiene due applicazioni Java sviluppate per il progetto di t
 
 2. Imposta la variabile d’ambiente `GITHUB_TOKEN`:
 
-### 📊 **Analisi del Call Graph**
+### **Analisi del Call Graph**
 
-- Integrazione con **SootUp framework** per l'analisi statica del codice   **Windows PowerShell**
+- Integrazione con **SootUp framework** per l'analisi statica del codice **Windows PowerShell**
 
 - Traversal BFS con limiti configurabili per evitare esplosioni del grafo
 
-- Rilevamento automatico dell'uso di mock e framework di test   ```powershell
+- Rilevamento automatico dell'uso di mock e framework di test ```powershell
 
-   $env:GITHUB_TOKEN="ghp_tuo_token"
+  $env:GITHUB_TOKEN="ghp_tuo_token"
 
-### ⚙️ **Configurazione Flessibile**   ```
+### **Configurazione Flessibile** ```
 
 - Parametri CLI estesi per personalizzare l'analisi
 - Modalità auto-tune per l'ottimizzazione automatica delle performance
@@ -146,11 +134,13 @@ L'analyzer genera file JSONL con informazioni dettagliate per ogni test:
 ## Algoritmi Implementati
 
 ### EnhancedHybridTestClassifier
+
 - **Analisi Multi-livello**: Combina evidenze a livello di classe e metodo
 - **Classificazione Adattiva**: Utilizza soglie configurabili per diversi tipi di progetto
 - **Rilevamento Pattern**: Identifica pattern specifici dei test di integrazione
 
 ### AssertionAwareFocalMethodHeuristic
+
 - **Analisi Bytecode**: Scansione del bytecode per identificare chiamate a metodi
 - **Awareness delle Asserzioni**: Riconoscimento di pattern di asserzione comuni
 - **Scoring Semantico**: Punteggio basato su convenzioni di naming e pattern di test
