@@ -27,7 +27,7 @@
     <dependency>
       <groupId>org.json</groupId>
       <artifactId>json</artifactId>
-      <version>20240303</version>
+      <version>20240303</version> <!-- Mantieni questa versione -->
     </dependency>
 
     <!-- JGit -->
@@ -35,6 +35,13 @@
       <groupId>org.eclipse.jgit</groupId>
       <artifactId>org.eclipse.jgit</artifactId>
       <version>6.9.0.202403050737-r</version>
+    </dependency>
+
+    <!-- Aggiungi dipendenze per la gestione di collezioni (se non già presenti) -->
+    <dependency>
+      <groupId>org.codehaus.mojo</groupId>
+      <artifactId>exec-maven-plugin</artifactId>
+      <version>3.1.0</version>
     </dependency>
   </dependencies>
 
@@ -54,7 +61,9 @@
         <version>3.1.0</version>
         <executions>
           <execution>
-            <goals><goal>java</goal></goals>
+            <goals>
+              <goal>java</goal>
+            </goals>
           </execution>
         </executions>
         <configuration>

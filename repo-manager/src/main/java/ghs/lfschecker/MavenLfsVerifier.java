@@ -19,14 +19,12 @@ import java.util.stream.Collectors;
 public class MavenLfsVerifier {
 
   private static final Pattern URL_WITH_CREDENTIALS = Pattern.compile(
-    "^https?://[^/\\s]+:[^@\\s]+@.*$"
-  );
+      "^https?://[^/\\s]+:[^@\\s]+@.*$");
 
   // Stato condiviso
   private static final Set<String> SKIP_BUILD = ConcurrentHashMap.newKeySet();
   private static final List<String> COMPLETED = Collections.synchronizedList(
-    new ArrayList<>()
-  );
+      new ArrayList<>());
 
   public static void main(String[] args) throws Exception {
     Settings s = Settings.fromEnv();
@@ -42,12 +40,11 @@ public class MavenLfsVerifier {
     }
 
     List<String> urls = Files.readAllLines(
-      Paths.get(args[0]),
-      StandardCharsets.UTF_8
-    )
-      .stream()
-      .filter(x -> !x.isBlank())
-      .collect(Collectors.toList());
+        Paths.get(args[0]),
+        StandardCharsets.UTF_8)
+        .stream()
+        .filter(x -> !x.isBlank())
+        .collect(Collectors.toList());
 
     Files.createDirectories(s.baseDir());
     List<String> needsLfs = new ArrayList<>();
@@ -60,23 +57,22 @@ public class MavenLfsVerifier {
     if (s.cleanLastUpdated()) {
       int removed = classifier.cleanLastUpdated(Paths.get(s.localRepo()));
       System.out.println(
-        "Rimossi " +
-        removed +
-        " file *.lastUpdated nella cache: " +
-        s.localRepo()
-      );
+          "Rimossi " +
+              removed +
+              " file *.lastUpdated nella cache: " +
+              s.localRepo());
     }
 
     /* ---------- clone parallelo ---------- */
     System.out.println("Clonazione repository …");
     ExecutorService clonePool = Executors.newFixedThreadPool(
-      Math.max(4, Runtime.getRuntime().availableProcessors())
-    );
+        Math.max(4, Runtime.getRuntime().availableProcessors()));
     Map<String, Path> repoToPath = new ConcurrentHashMap<>();
     for (String url : urls) {
       clonePool.submit(() -> {
         Path dest = cloneRepository(url, s, git);
-        if (dest != null) repoToPath.put(url, dest);
+        if (dest != null)
+          repoToPath.put(url, dest);
       });
     }
     clonePool.shutdown();
@@ -84,15 +80,12 @@ public class MavenLfsVerifier {
 
     /* ---------- warm-up parallelo bounded ---------- */
     System.out.println(
-      "Warm-up dependency:go-offline in parallelo controllato …"
-    );
+        "Warm-up dependency:go-offline in parallelo controllato …");
     int cores = Runtime.getRuntime().availableProcessors();
     int k = Math.min(4, Math.max(2, cores));
     ExecutorService warmPool = Executors.newFixedThreadPool(k);
     for (Map.Entry<String, Path> e : repoToPath.entrySet()) {
-      warmPool.submit(() ->
-        warmUpRepo(e.getKey(), e.getValue(), s, mvn, classifier)
-      );
+      warmPool.submit(() -> warmUpRepo(e.getKey(), e.getValue(), s, mvn, classifier));
     }
     warmPool.shutdown();
     warmPool.awaitTermination(6, TimeUnit.HOURS);
@@ -100,11 +93,11 @@ public class MavenLfsVerifier {
     /* ---------- build parallela offline ---------- */
     System.out.println("Build parallele – fase verify …");
     ExecutorService buildPool = Executors.newFixedThreadPool(
-      Math.max(4, Runtime.getRuntime().availableProcessors())
-    );
+        Math.max(4, Runtime.getRuntime().availableProcessors()));
     for (Map.Entry<String, Path> entry : repoToPath.entrySet()) {
       String url = entry.getKey();
-      if (SKIP_BUILD.contains(url)) continue;
+      if (SKIP_BUILD.contains(url))
+        continue;
       Path dir = entry.getValue();
       buildPool.submit(() -> handleBuild(url, dir, s, mvn, scanner, needsLfs));
     }
@@ -119,12 +112,11 @@ public class MavenLfsVerifier {
     System.out.println("\nSalvato needs-lfs.txt → " + s.needsLfsFile());
 
     Files.write(
-      s.okFile(),
-      COMPLETED,
-      StandardCharsets.UTF_8,
-      StandardOpenOption.CREATE,
-      StandardOpenOption.TRUNCATE_EXISTING
-    );
+        s.okFile(),
+        COMPLETED,
+        StandardCharsets.UTF_8,
+        StandardOpenOption.CREATE,
+        StandardOpenOption.TRUNCATE_EXISTING);
     System.out.println("\nRepository compilati in questo run:");
     COMPLETED.forEach(r -> System.out.println("   • " + r));
   }
@@ -152,13 +144,13 @@ public class MavenLfsVerifier {
   }
 
   private static void warmUpRepo(
-    String repoUrl,
-    Path repoDir,
-    Settings s,
-    MavenExecutor mvn,
-    RepoClassifier classifier
-  ) {
-    if (Files.notExists(repoDir.resolve("pom.xml"))) return;
+      String repoUrl,
+      Path repoDir,
+      Settings s,
+      MavenExecutor mvn,
+      RepoClassifier classifier) {
+    if (Files.notExists(repoDir.resolve("pom.xml")))
+      return;
 
     // Pre-filtro JDK8/tools.jar
     if (classifier.requiresJdk8Tools(repoDir)) {
@@ -177,24 +169,22 @@ public class MavenLfsVerifier {
       }
       lastOutput = res.output();
       System.err.printf(
-        "⚠️  go-offline fallito (%d/%d) per %s%n",
-        attempt,
-        s.maxRetries(),
-        repoDir.getFileName()
-      );
+          "⚠️  go-offline fallito (%d/%d) per %s%n",
+          attempt,
+          s.maxRetries(),
+          repoDir.getFileName());
       sleepSilently(2);
     }
 
     WarmupRepoIssue issue = classifier.classifyWarmupFailure(lastOutput);
     if (issue != WarmupRepoIssue.NONE) {
-      String note =
-        switch (issue) {
-          case HTTP_401 -> "  # 401 Unauthorized durante go-offline";
-          case HTTP_403 -> "  # 403 Forbidden durante go-offline";
-          case HTTP_409 -> "  # 409 Conflict durante go-offline";
-          case SNAPSHOT_MISSING -> "  # SNAPSHOT mancante/non pubblicato durante go-offline";
-          default -> "";
-        };
+      String note = switch (issue) {
+        case HTTP_401 -> "  # 401 Unauthorized durante go-offline";
+        case HTTP_403 -> "  # 403 Forbidden durante go-offline";
+        case HTTP_409 -> "  # 409 Conflict durante go-offline";
+        case SNAPSHOT_MISSING -> "  # SNAPSHOT mancante/non pubblicato durante go-offline";
+        default -> "";
+      };
 
       RepoClassifier.appendLine(s.needsExtRepoFile(), repoUrl + note);
       SKIP_BUILD.add(repoUrl);
@@ -203,13 +193,12 @@ public class MavenLfsVerifier {
   }
 
   private static void handleBuild(
-    String url,
-    Path repoDir,
-    Settings s,
-    MavenExecutor mvn,
-    ArtifactScanner scanner,
-    List<String> needsLfs
-  ) {
+      String url,
+      Path repoDir,
+      Settings s,
+      MavenExecutor mvn,
+      ArtifactScanner scanner,
+      List<String> needsLfs) {
     String name = repoName(url);
     try {
       // slack 2s per sicurezza su FS con risoluzione grossolana
@@ -221,19 +210,15 @@ public class MavenLfsVerifier {
         List<Path> classDirs = scanner.listClassesDirs(repoDir, start);
 
         List<Path> artifacts = new ArrayList<>(
-          jarArtifacts.size() + classDirs.size()
-        );
+            jarArtifacts.size() + classDirs.size());
         artifacts.addAll(jarArtifacts);
         artifacts.addAll(classDirs);
 
         if (!artifacts.isEmpty()) {
           COMPLETED.add(name);
           System.out.println("Build OK (tests skipped): " + name);
-          artifacts.forEach(p ->
-            System.out.println(
-              "   ↳ artefatto: " + ArtifactScanner.relToBase(s.baseDir(), p)
-            )
-          );
+          artifacts.forEach(p -> System.out.println(
+              "   ↳ artefatto: " + ArtifactScanner.relToBase(s.baseDir(), p)));
 
           // opzionale: genera classpath.txt per i moduli rilevati
           maybeGenerateClasspath(artifacts, s);
@@ -241,32 +226,25 @@ public class MavenLfsVerifier {
           // Fallback: artefatti preesistenti
           List<Path> existing = new ArrayList<>();
           existing.addAll(
-            scanner.listProducedArtifacts(repoDir, Instant.EPOCH)
-          );
+              scanner.listProducedArtifacts(repoDir, Instant.EPOCH));
           existing.addAll(scanner.listClassesDirs(repoDir, Instant.EPOCH));
 
           if (!existing.isEmpty()) {
             COMPLETED.add(name);
             System.out.println(
-              "BUILD SUCCESS (artefatti preesistenti): " + name
-            );
-            existing.forEach(p ->
-              System.out.println(
-                "   ↳ artefatto: " + ArtifactScanner.relToBase(s.baseDir(), p)
-              )
-            );
+                "BUILD SUCCESS (artefatti preesistenti): " + name);
+            existing.forEach(p -> System.out.println(
+                "   ↳ artefatto: " + ArtifactScanner.relToBase(s.baseDir(), p)));
             maybeGenerateClasspath(existing, s);
           } else {
             System.out.println(
-              "BUILD SUCCESS ma nessun artefatto trovato: " + name
-            );
+                "BUILD SUCCESS ma nessun artefatto trovato: " + name);
             if (usesLfs(repoDir)) {
               synchronized (needsLfs) {
                 needsLfs.add(url);
               }
               System.out.println(
-                "Contrassegnato per seconda passata con LFS: " + name
-              );
+                  "Contrassegnato per seconda passata con LFS: " + name);
             }
           }
         }
@@ -290,31 +268,36 @@ public class MavenLfsVerifier {
   }
 
   /**
-   * Rimuove tutte le directory "target" all'interno della repo, per evitare residui.
+   * Rimuove tutte le directory "target" all'interno della repo, per evitare
+   * residui.
    */
   private static void purgeTargets(Path repoDir) {
     try (var s = Files.walk(repoDir)) {
       s.filter(p -> p.getFileName().toString().equals("target"))
-        .sorted(Comparator.reverseOrder())
-        .forEach(p -> {
-          try {
-            Files.walk(p)
-              .sorted(Comparator.reverseOrder())
-              .forEach(q -> {
-                try { Files.deleteIfExists(q); } catch (Exception ignored) {}
-              });
-          } catch (Exception ignored) {}
-        });
+          .sorted(Comparator.reverseOrder())
+          .forEach(p -> {
+            try {
+              Files.walk(p)
+                  .sorted(Comparator.reverseOrder())
+                  .forEach(q -> {
+                    try {
+                      Files.deleteIfExists(q);
+                    } catch (Exception ignored) {
+                    }
+                  });
+            } catch (Exception ignored) {
+            }
+          });
       System.out.println("   ↳ target/ rimossi per: " + repoDir.getFileName());
-    } catch (Exception ignored) {}
+    } catch (Exception ignored) {
+    }
   }
 
   /* ================= util locali ================= */
 
   private static void maybeGenerateClasspath(List<Path> artifacts, Settings s) {
-    if (
-      !"1".equals(System.getenv().getOrDefault("GENERATE_CLASSPATH", "0"))
-    ) return;
+    if (!"1".equals(System.getenv().getOrDefault("GENERATE_CLASSPATH", "0")))
+      return;
     String scope = System.getenv().getOrDefault("CLASSPATH_SCOPE", "compile");
 
     Set<Path> modules = new LinkedHashSet<>();
@@ -338,33 +321,29 @@ public class MavenLfsVerifier {
         Path out = module.resolve("target").resolve("classpath.txt");
         Files.createDirectories(out.getParent());
         List<String> cmd = List.of(
-          mvnCmd,
-          "-Dmaven.repo.local=" + s.localRepo(),
-          "--offline",
-          "-q",
-          "-DincludeScope=" + scope,
-          "-Dmdep.outputFile=" + out.toAbsolutePath().toString(),
-          "dependency:build-classpath"
-        );
+            mvnCmd,
+            "-Dmaven.repo.local=" + s.localRepo(),
+            "--offline",
+            "-q",
+            "-DincludeScope=" + scope,
+            "-Dmdep.outputFile=" + out.toAbsolutePath().toString(),
+            "dependency:build-classpath");
         int exit = ProcessRunner.run(cmd, module, Duration.ofMinutes(5));
         if (exit == 0) {
           System.out.println(
-            "   ↳ classpath.txt generato: " +
-            ArtifactScanner.relToBase(s.baseDir(), out)
-          );
+              "   ↳ classpath.txt generato: " +
+                  ArtifactScanner.relToBase(s.baseDir(), out));
         } else {
           System.out.println(
-            "   ↳ classpath.txt NON generato per " +
-            ArtifactScanner.relToBase(s.baseDir(), module)
-          );
+              "   ↳ classpath.txt NON generato per " +
+                  ArtifactScanner.relToBase(s.baseDir(), module));
         }
       } catch (Exception e) {
         System.out.println(
-          "   ↳ classpath.txt errore su " +
-          ArtifactScanner.relToBase(s.baseDir(), module) +
-          ": " +
-          e.getMessage()
-        );
+            "   ↳ classpath.txt errore su " +
+                ArtifactScanner.relToBase(s.baseDir(), module) +
+                ": " +
+                e.getMessage());
       }
     }
   }
@@ -383,12 +362,14 @@ public class MavenLfsVerifier {
 
   private static boolean isOnPath(String exe) {
     String path = System.getenv("PATH");
-    if (path == null) return false;
+    if (path == null)
+      return false;
     String sep = System.getProperty("os.name").toLowerCase().contains("win")
-      ? ";"
-      : ":";
+        ? ";"
+        : ":";
     for (String dir : path.split(sep)) {
-      if (Files.isExecutable(Paths.get(dir, exe))) return true;
+      if (Files.isExecutable(Paths.get(dir, exe)))
+        return true;
     }
     return false;
   }
@@ -400,7 +381,8 @@ public class MavenLfsVerifier {
 
   private static boolean usesLfs(Path repoDir) {
     Path attr = repoDir.resolve(".gitattributes");
-    if (!Files.exists(attr)) return false;
+    if (!Files.exists(attr))
+      return false;
     try (java.util.stream.Stream<String> lines = Files.lines(attr)) {
       return lines.anyMatch(l -> l.contains("filter=lfs"));
     } catch (Exception e) {
@@ -423,32 +405,28 @@ public class MavenLfsVerifier {
       return;
     }
     List<String> urls = Files.readAllLines(
-      s.needsLfsFile(),
-      StandardCharsets.UTF_8
-    )
-      .stream()
-      .filter(x -> !x.isBlank())
-      .collect(Collectors.toList());
+        s.needsLfsFile(),
+        StandardCharsets.UTF_8)
+        .stream()
+        .filter(x -> !x.isBlank())
+        .collect(Collectors.toList());
 
     GitCloner git = new GitCloner();
     MavenExecutor mvn = new MavenExecutor();
 
     ExecutorService pool = Executors.newFixedThreadPool(
-      Math.max(4, Runtime.getRuntime().availableProcessors())
-    );
-    for (String url : urls) pool.submit(() ->
-      reprocessRepoWithLfs(url, s, git, mvn)
-    );
+        Math.max(4, Runtime.getRuntime().availableProcessors()));
+    for (String url : urls)
+      pool.submit(() -> reprocessRepoWithLfs(url, s, git, mvn));
     pool.shutdown();
     pool.awaitTermination(6, TimeUnit.HOURS);
   }
 
   private static void reprocessRepoWithLfs(
-    String url,
-    Settings s,
-    GitCloner git,
-    MavenExecutor mvn
-  ) {
+      String url,
+      Settings s,
+      GitCloner git,
+      MavenExecutor mvn) {
     String name = repoName(url);
     Path dest = s.baseDir().resolve(name + "_lfs");
     try {
@@ -456,7 +434,8 @@ public class MavenLfsVerifier {
       git.cloneWithLfsCli(url, dest, s);
       if (mvn.verify(dest, s) == 0) {
         System.out.println("Build OK con LFS: " + name + " → aggiungo a build-ok.txt come '" + name + "_lfs'");
-        // ✅ aggiungi la repo LFS al file ok con il nome di cartella realmente analizzabile
+        // ✅ aggiungi la repo LFS al file ok con il nome di cartella realmente
+        // analizzabile
         RepoClassifier.appendLine(s.okFile(), name + "_lfs");
       } else {
         System.out.println("Ancora KO dopo LFS: " + name);
@@ -466,8 +445,7 @@ public class MavenLfsVerifier {
       }
     } catch (Exception ex) {
       System.err.println(
-        "Errore seconda pass su " + name + ": " + ex.getMessage()
-      );
+          "Errore seconda pass su " + name + ": " + ex.getMessage());
     }
   }
 }
