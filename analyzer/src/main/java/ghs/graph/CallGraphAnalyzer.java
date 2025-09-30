@@ -1,25 +1,23 @@
-package ghs.analyzer.graph;
+package ghs.graph;
 
-import ghs.analyzer.model.*;
+import ghs.model.*;
 import java.util.*;
 import sootup.core.signatures.MethodSignature;
 import sootup.java.core.JavaSootMethod;
 
 public interface CallGraphAnalyzer {
   TestRecord analyzeOne(
-    String repoName,
-    java.nio.file.Path module,
-    String cfgId,
-    sootup.callgraph.CallGraph cg,
-    JavaSootMethod tm,
-    Set<String> projectProdClasses,
-    Set<String> projectTestClasses,
-    Set<String> projectAllClasses,
-    int maxDepth,
-    boolean pruneLibs,
-    int maxVisited,
-    java.util.function.Function<String, String> simpleName,
-    ghs.analyzer.heuristics.FocalClassHeuristic classHeu,
-    ghs.analyzer.heuristics.FocalMethodHeuristic methodHeu
-  );
+      String repoName,
+      java.nio.file.Path module,
+      String cfgId,
+      sootup.callgraph.CallGraph cg,
+      JavaSootMethod tm,
+      Set<String> projectProdClasses,
+      Set<String> projectTestClasses,
+      Set<String> projectAllClasses,
+      int maxDepth,
+      int maxVisited,
+      java.util.function.Function<String, String> simpleName,
+      ghs.heuristics.FocalClassHeuristic classHeu,
+      ghs.heuristics.FocalMethodHeuristic methodHeu);
 }

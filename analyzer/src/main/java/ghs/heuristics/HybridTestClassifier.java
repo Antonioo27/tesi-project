@@ -1,6 +1,6 @@
-package ghs.analyzer.heuristics;
+package ghs.heuristics;
 
-import ghs.analyzer.model.TestKind;
+import ghs.model.TestKind;
 import java.util.*;
 import java.util.stream.Collectors;
 import sootup.callgraph.CallGraph;
@@ -29,36 +29,33 @@ public final class HybridTestClassifier implements TestClassifier {
 
   @Override
   public ClassificationResult classify(
-    CallGraph cg,
-    JavaSootMethod testMethod,
-    Set<String> projectProdClasses,
-    Set<String> projectTestClasses
-  ) {
+      CallGraph cg,
+      JavaSootMethod testMethod,
+      Set<String> projectProdClasses,
+      Set<String> projectTestClasses) {
     MethodSignature tSig = testMethod.getSignature();
 
     // Collect direct calls to project production classes
     List<MethodSignature> directProjectMethods = cg
-      .callsFrom(tSig)
-      .stream()
-      .map(call -> call.getTargetMethodSignature())
-      .filter(ms -> projectProdClasses.contains(
-        ms.getDeclClassType().getFullyQualifiedName()
-      ))
-      .collect(Collectors.toList());
+        .callsFrom(tSig)
+        .stream()
+        .map(call -> call.getTargetMethodSignature())
+        .filter(ms -> projectProdClasses.contains(
+            ms.getDeclClassType().getFullyQualifiedName()))
+        .collect(Collectors.toList());
 
     // Group by class to distinguish class-level vs method-level complexity
     Map<String, List<MethodSignature>> callsByClass = directProjectMethods
-      .stream()
-      .collect(Collectors.groupingBy(
-        ms -> ms.getDeclClassType().getFullyQualifiedName()
-      ));
+        .stream()
+        .collect(Collectors.groupingBy(
+            ms -> ms.getDeclClassType().getFullyQualifiedName()));
 
     // Extract evidence for classification
     Evidence evidence = new Evidence(
-      directProjectMethods.size(),                    // Total method calls
-      callsByClass.size(),                           // Unique classes called
-      directProjectMethods,                          // Detailed method list
-      callsByClass                                   // Calls grouped by class
+        directProjectMethods.size(), // Total method calls
+        callsByClass.size(), // Unique classes called
+        directProjectMethods, // Detailed method list
+        callsByClass // Calls grouped by class
     );
 
     // Apply hybrid classification logic
@@ -66,15 +63,14 @@ public final class HybridTestClassifier implements TestClassifier {
 
     // Build ordered list of classes for compatibility
     LinkedHashSet<String> directProjectClasses = directProjectMethods
-      .stream()
-      .map(ms -> ms.getDeclClassType().getFullyQualifiedName())
-      .collect(Collectors.toCollection(LinkedHashSet::new));
+        .stream()
+        .map(ms -> ms.getDeclClassType().getFullyQualifiedName())
+        .collect(Collectors.toCollection(LinkedHashSet::new));
 
     return new ClassificationResult(
-      kind,
-      new ArrayList<>(directProjectClasses),
-      evidence.uniqueClassCount
-    );
+        kind,
+        new ArrayList<>(directProjectClasses),
+        evidence.uniqueClassCount);
   }
 
   private TestKind classifyWithEvidence(Evidence evidence) {
@@ -107,17 +103,16 @@ public final class HybridTestClassifier implements TestClassifier {
    * Evidence collected for classification decision
    */
   public static class Evidence {
-    public final int totalMethodCalls;              // Total direct method calls to project
-    public final int uniqueClassCount;              // Number of unique project classes called
-    public final List<MethodSignature> allMethods;  // All direct method calls
+    public final int totalMethodCalls; // Total direct method calls to project
+    public final int uniqueClassCount; // Number of unique project classes called
+    public final List<MethodSignature> allMethods; // All direct method calls
     public final Map<String, List<MethodSignature>> methodsByClass; // Calls grouped by class
 
     public Evidence(
-      int totalMethodCalls,
-      int uniqueClassCount, 
-      List<MethodSignature> allMethods,
-      Map<String, List<MethodSignature>> methodsByClass
-    ) {
+        int totalMethodCalls,
+        int uniqueClassCount,
+        List<MethodSignature> allMethods,
+        Map<String, List<MethodSignature>> methodsByClass) {
       this.totalMethodCalls = totalMethodCalls;
       this.uniqueClassCount = uniqueClassCount;
       this.allMethods = List.copyOf(allMethods);
@@ -129,9 +124,9 @@ public final class HybridTestClassifier implements TestClassifier {
      */
     public Optional<String> getMostCalledClass() {
       return methodsByClass.entrySet()
-        .stream()
-        .max(Map.Entry.comparingByValue(Comparator.comparing(List::size)))
-        .map(Map.Entry::getKey);
+          .stream()
+          .max(Map.Entry.comparingByValue(Comparator.comparing(List::size)))
+          .map(Map.Entry::getKey);
     }
 
     /**
@@ -139,14 +134,15 @@ public final class HybridTestClassifier implements TestClassifier {
      * Returns 1.0 if all calls go to one class, 0.0 if evenly distributed
      */
     public double getClassConcentration() {
-      if (uniqueClassCount <= 1) return 1.0;
-      
+      if (uniqueClassCount <= 1)
+        return 1.0;
+
       int maxCallsToOneClass = methodsByClass.values()
-        .stream()
-        .mapToInt(List::size)
-        .max()
-        .orElse(0);
-      
+          .stream()
+          .mapToInt(List::size)
+          .max()
+          .orElse(0);
+
       return totalMethodCalls > 0 ? (double) maxCallsToOneClass / totalMethodCalls : 0.0;
     }
   }

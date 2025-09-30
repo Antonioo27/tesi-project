@@ -1,4 +1,4 @@
-package ghs.analyzer.graph;
+package ghs.graph;
 
 import sootup.callgraph.CallGraph;
 import sootup.core.signatures.MethodSignature;
@@ -13,12 +13,10 @@ public final class MockUsageDetector {
           || fqn.startsWith("org.easymock.")
           || fqn.startsWith("org.powermock.")
           || fqn.startsWith("io.mockk.")
-          // segnali tipici Mockito:
-          || (fqn.startsWith("org.mockito.") && (
-              sub.contains(" when(") || sub.contains(" verify(") ||
-              sub.contains(" spy(")  || sub.contains(" mock(")   ||
-              sub.contains(" openMocks(") || sub.contains(" initMocks(")
-          ));
+      // segnali tipici Mockito:
+          || (fqn.startsWith("org.mockito.") && (sub.contains(" when(") || sub.contains(" verify(") ||
+              sub.contains(" spy(") || sub.contains(" mock(") ||
+              sub.contains(" openMocks(") || sub.contains(" initMocks(")));
     });
   }
 }

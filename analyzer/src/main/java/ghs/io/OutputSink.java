@@ -1,10 +1,11 @@
-package ghs.analyzer.io;
+package ghs.io;
 
-import ghs.analyzer.model.TestRecord;
+import ghs.model.TestRecord;
 
 public interface OutputSink extends AutoCloseable {
   void write(TestRecord rec) throws Exception;
 
   @Override
-  default void close() throws Exception {}
+  default void close() throws Exception {
+  }
 }

@@ -1,8 +1,7 @@
-package ghs.analyzer.model;
-
+package ghs.model;
 
 import java.nio.file.Path;
-import java.util.List;
 
-
-public record ModuleInputs(Path prodClasses, Path testClasses, List<Path> dependencyJars) {}
+/** Solo path delle classi di produzione e di test. */
+public record ModuleInputs(Path prodClasses, Path testClasses) {
+}

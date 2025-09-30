@@ -1,4 +1,4 @@
-package ghs.analyzer.discovery;
+package ghs.discovery;
 
 import java.util.List;
 import sootup.java.core.JavaSootMethod;

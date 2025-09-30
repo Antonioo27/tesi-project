@@ -83,7 +83,7 @@
         <artifactId>exec-maven-plugin</artifactId>
         <version>3.5.0</version>
         <configuration>
-          <mainClass>ghs.analyzer.app.Main</mainClass>
+          <mainClass>ghs.app.Main</mainClass>
           <cleanupDaemonThreads>false</cleanupDaemonThreads>
         </configuration>
       </plugin>

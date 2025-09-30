@@ -1,4 +1,4 @@
-package ghs.analyzer.io;
+package ghs.io;
 
 import java.nio.file.Path;
 import java.util.List;

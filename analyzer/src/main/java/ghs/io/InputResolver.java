@@ -1,6 +1,6 @@
-package ghs.analyzer.io;
+package ghs.io;
 
-import ghs.analyzer.model.ModuleInputs;
+import ghs.model.ModuleInputs;
 import java.nio.file.Path;
 
 public interface InputResolver {

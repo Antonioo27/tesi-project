@@ -1,4 +1,4 @@
-package ghs.analyzer.model;
+package ghs.model;
 
 public enum TestKind {
   UNIT,

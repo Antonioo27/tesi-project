@@ -1,78 +1,135 @@
-package ghs.analyzer.app;
+package ghs.app;
 
-import ghs.analyzer.cli.*;
-import ghs.analyzer.discovery.*;
-import ghs.analyzer.graph.*;
-import ghs.analyzer.heuristics.*;
-import ghs.analyzer.heuristics.EnhancedHybridTestClassifier;
-import ghs.analyzer.heuristics.TestClassifier;
-import ghs.analyzer.io.*;
-import ghs.analyzer.model.*;
-import ghs.analyzer.pipeline.*;
-import ghs.analyzer.sootupview.*;
+import ghs.cli.*;
+import ghs.discovery.*;
+import ghs.graph.*;
+import ghs.heuristics.*;
+import ghs.heuristics.EnhancedHybridTestClassifier;
+import ghs.heuristics.TestClassifier;
+import ghs.io.*;
+import ghs.model.*;
+import ghs.pipeline.*;
+import ghs.sootupview.*;
 import java.nio.file.*;
 
+/**
+ * Composition root dell'applicazione "Analyzer".
+ *
+ * Responsabilità:
+ * 1) Parsing degli argomenti CLI -> CliOptions
+ * 2) Mappatura in AnalysisConfig (immutabile) per il runtime
+ * 3) Costruzione delle dipendenze concrete (scanner, I/O, heuristics, SootUp)
+ * 4) Assemblaggio della strategia full (costruzione CHA + euristiche)
+ * 5) Avvio della pipeline che scansiona i moduli Maven e analizza i test
+ *
+ * Output: JSONL con un record per test analizzato (focal class/method, stats,
+ * score, kind).
+ */
 public final class Main {
 
-  public static void main(String[] args) throws Exception {
-    CliOptions opts = CliParser.parse(args);
-    AnalysisConfig cfg = AnalysisConfig.from(opts);
+        public static void main(String[] args) throws Exception {
+                // ======================
+                // 1) Lettura e validazione input CLI
+                // ======================
+                // Esempi di flag supportati: --base, --out, --maxDepth, --maxVisited, --resume,
+                // ...
+                // Vedi CliParser/CliOptions per l'elenco completo e i default.
+                CliOptions opts = CliParser.parse(args);
 
-    // I/O e risorse
-    ModuleScanner scanner = new DefaultModuleScanner();
-    InputResolver inputResolver = new DefaultInputResolver();
-    ProgressStore progress = new FileProgressStore();
-    OutputSink out = new JsonlOutputSink(cfg);
+                // ======================
+                // 2) Configurazione runtime immutabile
+                // ======================
+                // Centralizza tutti i parametri usati nelle fasi successive (anche dopo
+                // autotuning).
+                AnalysisConfig cfg = AnalysisConfig.from(opts);
 
-    // SootUp & discovery
-    ViewFactory viewFactory = new DefaultViewFactory();
-    TestDiscovery discovery = new JUnitTestDiscovery();
+                // ======================
+                // 3) Infrastruttura I/O e risorse
+                // ======================
+                // - ModuleScanner: individua moduli Maven (cartelle con pom.xml)
+                // - InputResolver: risolve i path di target/classes e target/test-classes
+                // - ProgressStore: file "analyzer-progress-<cfgId>.txt" per resume per-modulo
+                // - OutputSink: scrittura JSONL (unico file o "split per repo")
+                ModuleScanner scanner = new DefaultModuleScanner();
+                InputResolver inputResolver = new DefaultInputResolver();
+                ProgressStore progress = new FileProgressStore();
+                OutputSink out = new JsonlOutputSink(cfg);
 
-    // Heuristics & graph
-    FocalClassHeuristic classHeu = new NameBasedFocalClassHeuristic();
-    FocalMethodHeuristic methodHeu = new AssertionAwareFocalMethodHeuristic(
-      new NameAndDistanceFocalMethodHeuristic()
-    );
-    BfsTraverser bfs = new BfsTraverser();
-    MockUsageDetector mocks = new MockUsageDetector();
-    UnitIntegrationScorer scorer = new UnitIntegrationScorer();
-    TestClassifier classifier = new EnhancedHybridTestClassifier(
-      cfg.integrationMinProjectClasses(),
-      cfg.integrationMinProjectMethods(),
-      cfg.highConcentrationThreshold()
-    );
+                // ======================
+                // 4) SootUp & discovery dei test
+                // ======================
+                // ViewFactory crea una JavaView con (prod + test + JDK).
+                // TestDiscovery trova i metodi annotati @Test (JUnit 4/5 e TestNG).
+                ViewFactory viewFactory = new DefaultViewFactory();
+                TestDiscovery discovery = new JUnitTestDiscovery();
 
-    // Strategie
-    AnalyzerStrategy fast = new FastHeuristicStrategy(classHeu);
-    AnalyzerStrategy full = new FullCallGraphStrategy(
-      viewFactory,
-      discovery,
-      classHeu,
-      methodHeu,
-      bfs,
-      mocks,
-      scorer,
-      classifier
-    );
+                // ======================
+                // 5) Euristiche e helper di analisi
+                // ======================
+                // Focal class: inferita dal nome del test (es. FooTest -> Foo).
+                FocalClassHeuristic classHeu = new NameBasedFocalClassHeuristic();
 
-    ModuleAnalyzer moduleAnalyzer = new ModuleAnalyzer(
-      inputResolver,
-      viewFactory,
-      discovery,
-      progress,
-      out,
-      fast,
-      full
-    );
+                // Focal method: euristica "assertion-aware" (ASM sul .class del test)
+                // con fallback su una euristica nome+distanza che evita getter/setter.
+                FocalMethodHeuristic methodHeu = new AssertionAwareFocalMethodHeuristic(
+                                new NameAndDistanceFocalMethodHeuristic());
 
-    AnalyzerPipeline pipeline = new AnalyzerPipeline(
-      scanner,
-      moduleAnalyzer,
-      cfg
-    );
-    pipeline.run(Paths.get(cfg.baseDir()));
-    out.close();
+                // Call-graph helpers:
+                BfsTraverser bfs = new BfsTraverser(); // BFS con potatura librerie (riduce rumore/memoria)
+                MockUsageDetector mocks = new MockUsageDetector(); // segnali di Mockito/EasyMock/…
+                UnitIntegrationScorer scorer = new UnitIntegrationScorer(); // score continuo 0..1
 
-    System.out.println("\nAnalisi completata.");
-  }
+                // Classificatore parametrico (soglie da CLI) per UNIT vs INTEGRATION.
+                TestClassifier classifier = new EnhancedHybridTestClassifier(
+                                cfg.integrationMinProjectClasses(),
+                                cfg.integrationMinProjectMethods(),
+                                cfg.highConcentrationThreshold());
+
+                // ======================
+                // 6) Strategia di analisi e orchestrazione
+                // ======================
+                // Strategia "full": costruisce il CHA e, per ogni test,
+                // - stima focal class/method
+                // - attraversa il grafo (BFS)
+                // - misura feature (spread classi, profondità, mock)
+                // - calcola score + classificazione
+                AnalyzerStrategy full = new FullCallGraphStrategy(
+                                viewFactory,
+                                discovery,
+                                classHeu,
+                                methodHeu,
+                                bfs,
+                                mocks,
+                                scorer,
+                                classifier);
+
+                // ModuleAnalyzer: warm-up SootUp, discovery test, autotuning batch, resume/OOM
+                // handling.
+                ModuleAnalyzer moduleAnalyzer = new ModuleAnalyzer(
+                                inputResolver,
+                                viewFactory,
+                                discovery,
+                                progress,
+                                out,
+                                full);
+
+                // Pipeline: scansiona moduli Maven sotto baseDir e delega l'analisi dei test
+                // per modulo.
+                AnalyzerPipeline pipeline = new AnalyzerPipeline(
+                                scanner,
+                                moduleAnalyzer,
+                                cfg);
+
+                // ======================
+                // 7) Avvio
+                // ======================
+                // Percorre ricorsivamente cfg.baseDir(), applica i filtri (es. onlyFrom) e
+                // analizza.
+                pipeline.run(Paths.get(cfg.baseDir()));
+
+                // Flush/chiusura risorse di output.
+                out.close();
+
+                System.out.println("\nAnalisi completata.");
+        }
 }

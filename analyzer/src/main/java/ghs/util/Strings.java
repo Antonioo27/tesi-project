@@ -1,9 +1,10 @@
 // file: src/main/java/ghs/analyzer/util/Strings.java
-package ghs.analyzer.util;
+package ghs.util;
 
 public final class Strings {
 
-  private Strings() {}
+  private Strings() {
+  }
 
   public static String simpleName(String fqn) {
     int i = fqn.lastIndexOf('.');

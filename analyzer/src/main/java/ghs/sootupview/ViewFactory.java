@@ -1,4 +1,4 @@
-package ghs.analyzer.sootupview;
+package ghs.sootupview;
 
 import sootup.core.inputlocation.AnalysisInputLocation;
 import sootup.java.core.views.JavaView;

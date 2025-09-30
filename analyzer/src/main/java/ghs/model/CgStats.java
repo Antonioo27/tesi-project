@@ -1,11 +1,10 @@
-package ghs.analyzer.model;
-
+package ghs.model;
 
 public record CgStats(
-int projectCalls,
-int callsToFocalClass,
-int callsToOtherProjectClasses,
-int callsToLibraries,
-int uniqueProjectClasses,
-int maxDepthVisited
-) {}
+        int projectCalls,
+        int callsToFocalClass,
+        int callsToOtherProjectClasses,
+        int callsToLibraries,
+        int uniqueProjectClasses,
+        int maxDepthVisited) {
+}

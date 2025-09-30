@@ -1,4 +1,4 @@
-package ghs.analyzer.heuristics;
+package ghs.heuristics;
 
 public interface FocalClassHeuristic {
   /**
