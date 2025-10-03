@@ -1,29 +1,31 @@
 package ghs.fetcher;
 
 import ghs.lfschecker.MavenLfsVerifier;
-import org.json.JSONArray;
-import org.json.JSONObject;
-import java.io.*;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.nio.file.*;
-import java.nio.charset.StandardCharsets; // Import aggiunto
+import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.stream.Collectors; // Import aggiunto
+import java.util.stream.Collectors;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 public class App {
 
   public static void main(String[] args) throws Exception {
-    String apiHost = System.getenv().getOrDefault("SEARCH_API_HOST", "https://api.github.com");
-    String apiParamsRaw = System.getenv()
-        .getOrDefault(
-            "SEARCH_API_PARAMS",
-            "q=language:Java+stars:>1000+forks:>50+size:<10000");
+    String apiHost = System.getenv().getOrDefault("SEARCH_API_HOST", "https://api.github.com"); // 🏭 Parametri avanzati
+                                                                                                // per repository
+                                                                                                // INDUSTRIALI di
+                                                                                                // qualità
+                                                                                                // production-ready
+    String apiParamsRaw = System.getenv().getOrDefault(
+        "SEARCH_API_PARAMS",
+        "q=language:Java+stars:>1000+forks:>50+size:>300+size:<150000+pushed:>2022-01-01+"
+            + "is:public+archived:false+fork:false+has:readme+has:license");
 
     int startPage = Integer.parseInt(System.getenv().getOrDefault("SEARCH_API_START_PAGE", "1"));
     int pageSize = Integer.parseInt(System.getenv().getOrDefault("SEARCH_API_PAGE_SIZE", "100"));
     int maxPages = Integer.parseInt(System.getenv().getOrDefault("SEARCH_API_MAX_PAGES", "10"));
-    long delayMs = Long.parseLong(System.getenv().getOrDefault("SEARCH_API_DELAY_MS", "250")); // tra richieste
+    // Delay aumentato per rispettare rate limits GitHub API (5000 req/hour)
+    long delayMs = Long.parseLong(System.getenv().getOrDefault("SEARCH_API_DELAY_MS", "500"));
 
     // Pulizia: togli eventuali page/size già presenti nei params
     String apiParams = Arrays.stream(apiParamsRaw.split("&"))
@@ -50,13 +52,26 @@ public class App {
       if (delayMs > 0) {
         Thread.sleep(delayMs);
       }
-    } // 2. Scrittura in repos.txt
+    }
+
+    // 2. Scrittura in repos.txt
     Path reposFile = Paths.get("repos.txt");
     Files.write(reposFile, allUrls, StandardCharsets.UTF_8);
-    System.out.println("Salvati " + allUrls.size() + " progetti Maven in repos.txt");
 
-    // 3. Avvio verifica clone + build
+    System.out.println("Salvati " + allUrls.size() + " progetti Maven in repos.txt"); // 4. Verifica qualità campione
+                                                                                      // repository
+    if (!allUrls.isEmpty()) {
+      System.out.println("\nAnteprima repository selezionati:");
+      allUrls.stream().limit(5).forEach(url -> System.out.println("  ✅ " + url));
+
+      if (allUrls.size() > 5) {
+        System.out.println("  ... e altri " + (allUrls.size() - 5) + " repository");
+      }
+    }
+
+    // 5. Avvio verifica clone + build
     System.out.println("Avvio verifica clone + build …");
     MavenLfsVerifier.main(new String[] { reposFile.toString() });
   }
+
 }

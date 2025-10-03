@@ -18,93 +18,114 @@ import sootup.java.core.JavaSootMethod;
  * alla focal class. In caso di errori/assenza di segnali, ricade su una
  * euristica di fallback (es. NameAndDistance...).
  *
+ * Differenze rispetto alla versione precedente:
+ * - NIENTE stato interno/setContext: tutto il contesto arriva in
+ * FocalMethodContext.
+ * - Integrata la “regola forte” prima presente in ChaCallGraphAnalyzer:
+ * se esiste UNA SOLA chiamata DIRETTA dal test a un metodo della focal class
+ * (e non è triviale), la si sceglie subito (fast-path). Altrimenti si
+ * applica la logica assertion-aware.
+ *
  * NOTE:
- * - setContext(testMethod, module) DEVE essere chiamato prima di
- * selectFocalMethod.
  * - Il mapping finale dai nomi trovati nel bytecode ai MethodSignature avviene
  * PER NOME: in caso di overload, restituisce il PRIMO in 'candidatesOrdered'.
  */
 public final class AssertionAwareFocalMethodHeuristic implements FocalMethodHeuristic {
 
-  private final FocalMethodHeuristic fallback; // euristica di ripiego
-  private JavaSootMethod testMethod; // contesto: quale metodo di test ispezionare
-  private Path module; // contesto: root del modulo (per trovare target/test-classes)
-
-  public AssertionAwareFocalMethodHeuristic(FocalMethodHeuristic fallback) {
-    this.fallback = fallback;
-  }
-
-  /**
-   * Imposta il contesto del test corrente (deve essere chiamato ad ogni test).
-   */
-  public void setContext(JavaSootMethod testMethod, Path module) {
-    this.testMethod = testMethod;
-    this.module = module;
-  }
-
   @Override
-  public Optional<MethodSignature> selectFocalMethod(
-      String focalClassFqn,
-      List<MethodSignature> candidatesOrdered) {
-    // Se manca il contesto, non possiamo leggere il bytecode -> fallback
-    if (testMethod == null || module == null) {
-      System.out.println("Warning: context not set for AssertionAwareFocalMethodHeuristic");
-      return fallback.selectFocalMethod(focalClassFqn, candidatesOrdered);
+  public Optional<MethodSignature> selectFocalMethod(FocalMethodContext ctx) {
+    // Estrai il contesto necessario
+    final List<MethodSignature> candidatesOrdered = ctx.candidatesOrdered();
+    final Set<MethodSignature> directCallsFromTest = ctx.directCallsFromTest();
+    final String focalClassFqn = ctx.focalClassFqn();
+    final JavaSootMethod testMethod = ctx.testMethod();
+    final Path module = ctx.module();
+
+    // 0) Se non ci sono candidati, non ha senso ispezionare il bytecode → fallback
+    if (candidatesOrdered == null || candidatesOrdered.isEmpty()) {
+      return Optional.empty();
     }
 
-    // Gruppo i candidati per NOME, preservando l'ordine (LinkedHashMap):
-    // se dal bytecode seleziono un "foo", qui prenderò il primo "foo" in 'ordered'.
+    // 1) FAST-PATH: se c'è UNA SOLA chiamata DIRETTA del test a 1 metodo della
+    // focal class
+    // (e non è triviale), prendila subito. Questo cattura il caso AAA tipico.
+    List<MethodSignature> directToFocal = new ArrayList<>();
+    for (MethodSignature ms : candidatesOrdered) {
+      if (directCallsFromTest != null && directCallsFromTest.contains(ms)) {
+        directToFocal.add(ms);
+      }
+    }
+    if (directToFocal.size() == 1) {
+      MethodSignature only = directToFocal.get(0);
+      String onlyName = methodNameFromSubSig(only.getSubSignature().toString());
+      if (!isTrivial(onlyName)) {
+        return Optional.of(only); // shortcut: unico diretto non triviale
+      }
+      // Se è triviale (es. getter), NON lo prendiamo alla cieca e passiamo
+      // all'analisi assertion-aware
+    }
+
+    // 2) Senza testMethod/module non possiamo leggere il .class → fallback
+    if (testMethod == null || module == null) {
+      System.out.println("Warning: missing testMethod/module in FocalMethodContext; using fallback.");
+      return Optional.empty(); // nessun candidato → niente da scegliere
+    }
+
+    // 3) Prepara strutture di supporto: byName per gestire overload (prendi il
+    // primo in 'ordered')
     Map<String, List<MethodSignature>> byName = new LinkedHashMap<>();
     for (MethodSignature ms : candidatesOrdered) {
       String name = methodNameFromSubSig(ms.getSubSignature().toString());
       byName.computeIfAbsent(name, k -> new ArrayList<>()).add(ms);
     }
 
-    // Nome interno (ASM) della focal class, con '/' al posto di '.'
+    // 4) Prepara info ASM
     String focalOwnerInternal = focalClassFqn.replace('.', '/');
 
-    // Preparo info sul metodo di test e path al relativo .class
-    String testClassFqn = testMethod.getSignature().getDeclClassType().getFullyQualifiedName();
-    String testMethodName = methodNameFromSubSig(testMethod.getSignature().getSubSignature().toString());
-    Path classFile = module.resolve("target").resolve("test-classes")
+    String testClassFqn = testMethod.getSignature()
+        .getDeclClassType()
+        .getFullyQualifiedName();
+    String testMethodName = methodNameFromSubSig(
+        testMethod.getSignature().getSubSignature().toString());
+    Path classFile = module
+        .resolve("target")
+        .resolve("test-classes")
         .resolve(testClassFqn.replace('.', '/') + ".class");
 
     if (!Files.isRegularFile(classFile)) {
-      // Non trovo il .class del test -> fallback
       System.out.println("Warning: test class file not found: " + classFile);
-      return fallback.selectFocalMethod(focalClassFqn, candidatesOrdered);
+      return Optional.empty();
     }
 
-    // Raccoglitori per le INVOKE osservate
-    final List<Invk> allFocalCalls = new ArrayList<>(); // tutte le chiamate alla focal class
-    final Invk[] bestBeforeAssertion = new Invk[1]; // la migliore prima dell'ultima assertion
-    final Invk[] lastFocalAnywhere = new Invk[1]; // l'ultima chiamata alla focal vista (fallback)
+    // 5) Scansione bytecode con logica di selezione intelligente
+    final List<Invk> allFocalCalls = new ArrayList<>(); // tutte le invocazioni su focal class
+    final Invk[] bestBeforeAssertion = new Invk[1]; // migliore invocazione prima di assertion
+    final Invk[] lastFocalAnywhere = new Invk[1]; // ultima invocazione su focal in assoluto (fallback)
 
-    // === Lettura bytecode col visitor ASM ===
     try (InputStream in = Files.newInputStream(classFile)) {
       ClassReader cr = new ClassReader(in);
       cr.accept(new ClassVisitor(Opcodes.ASM9) {
         @Override
         public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
-          // Considero solo *il* metodo di test (match per NOME; se ci fossero overload
-          // omonimi, prendo il primo)
+          // Considero solo il metodo di test target (match per NOME; in caso di overload
+          // omonimi prendo il primo)
           if (!Objects.equals(name, testMethodName))
             return null;
 
           return new MethodVisitor(Opcodes.ASM9) {
-            int idx = 0; // contatore delle INVOKE incontrate (proxy di "posizione" nel test)
+            int idx = 0; // contatore INVOKE (proxy di "posizione" nel test)
 
             @Override
             public void visitMethodInsn(int opcode, String owner, String mName, String mDesc, boolean itf) {
-              // 1) INVOKE verso la focal class -> traccia
+              // Track tutte le INVOKE su focalClass
               if (owner.equals(focalOwnerInternal)) {
                 Invk call = new Invk(owner, mName, mDesc, idx);
                 allFocalCalls.add(call);
-                lastFocalAnywhere[0] = call;
+                lastFocalAnywhere[0] = call; // aggiorna sempre "l'ultima vista"
               }
 
-              // 2) INVOKE verso una libreria di assertion -> valuta la "migliore" tra quelle
-              // viste fin qui
+              // Se è una assert, analizza le chiamate focal "viste fin qui" e scegli la
+              // migliore
               if (AssertionDetector.isAssertionOwnerInternal(owner)) {
                 bestBeforeAssertion[0] = selectBestFocalCall(allFocalCalls, testMethodName);
               }
@@ -114,35 +135,48 @@ public final class AssertionAwareFocalMethodHeuristic implements FocalMethodHeur
         }
       }, 0);
     } catch (IOException e) {
-      // Qualsiasi problema di I/O -> fallback
-      return fallback.selectFocalMethod(focalClassFqn, candidatesOrdered);
+      // Qualsiasi problema di I/O
+      return Optional.empty();
     }
 
-    // Scelta finale: preferisci la migliore prima dell'ULTIMA assertion; altrimenti
-    // l'ultima ovunque.
-    Invk pick = (bestBeforeAssertion[0] != null) ? bestBeforeAssertion[0] : lastFocalAnywhere[0];
+    // 6) Scelta finale:
+    // - preferisci la migliore prima dell'ULTIMA assertion (se esiste),
+    // - altrimenti l'ultima invocazione su focal ovunque (se esiste),
+    // - altrimenti fallback.
+    Invk pick = (bestBeforeAssertion[0] != null)
+        ? bestBeforeAssertion[0]
+        : lastFocalAnywhere[0];
     if (pick == null) {
-      // Nessuna chiamata alla focal class nel metodo di test -> fallback
-      return fallback.selectFocalMethod(focalClassFqn, candidatesOrdered);
+      return Optional.empty();
     }
 
-    // Rimappa per nome verso i candidati di SootUp (gestione overload: prendi il
+    // 7) Mappo il nome scelto sul set di candidati (gestione overload: prendi il
     // primo in 'ordered')
     List<MethodSignature> withSameName = byName.getOrDefault(pick.name, List.of());
     if (!withSameName.isEmpty()) {
       return Optional.of(withSameName.get(0));
     }
 
-    // Nome non trovato tra i candidati (raro: divergenze di classpath/bytecode) ->
-    // fallback
-    return fallback.selectFocalMethod(focalClassFqn, candidatesOrdered);
+    // Nome non presente tra i candidati (raro: divergenze di classpath/bytecode)
+    return Optional.empty();
   }
 
   // ================= helpers =================
 
   /**
-   * Sceglie la migliore INVOKE tra quelle alla focal class viste prima
+   * Seleziona la migliore chiamata a focal class tra quelle disponibili PRIMA
    * dell'assertion.
+   * Applica logica intelligente per distinguere tra setup/getter e veri metodi
+   * focali.
+   *
+   * Criteri (scoreFocalCall):
+   * - +50 se il nome del metodo contiene il "core" del nome del test (es.
+   * shouldCompute → compute).
+   * - −30 se è "triviale" (ctor, equals/toString, getter/setter/is/has, ecc.).
+   * - +20 se "sembra azione" (prefix verbali noti: compute/process/validate...).
+   * - +10 se è esattamente l'ULTIMA invocazione alla focal prima di
+   * quell'assertion (bonus discreto).
+   * - +index (bonus continuo: invocazioni più tarde pesano un po' di più).
    */
   private Invk selectBestFocalCall(List<Invk> allCalls, String testMethodName) {
     if (allCalls.isEmpty())
@@ -155,14 +189,14 @@ public final class AssertionAwareFocalMethodHeuristic implements FocalMethodHeur
     int bestScore = Integer.MIN_VALUE;
 
     for (Invk call : allCalls) {
-      int score = scoreFocalCall(call, testNameCore, lastIdx); // <-- passa lastIdx
+      int score = scoreFocalCall(call, testNameCore, lastIdx);
       if (score > bestScore) {
         bestScore = score;
         bestCall = call;
       }
     }
 
-    // Fallback anti-trivial già presente
+    // Se il migliore candidato è comunque triviale, prova l'ultimo non-triviale
     if (bestCall != null && isTrivial(bestCall.name)) {
       for (int i = allCalls.size() - 1; i >= 0; i--) {
         Invk call = allCalls.get(i);
@@ -174,31 +208,30 @@ public final class AssertionAwareFocalMethodHeuristic implements FocalMethodHeur
   }
 
   /** Punteggio euristico per una chiamata alla focal class. */
-  // Overload con lastIdx
   private int scoreFocalCall(Invk call, String testNameCore, int lastIdx) {
     int score = 0;
     String methodName = call.name;
 
-    // BONUS: match col nome del test
+    // BONUS: match col "core" del nome del test
     if (testNameCore != null && !testNameCore.isEmpty()
         && methodName.toLowerCase().contains(testNameCore.toLowerCase())) {
       score += 50;
     }
 
-    // MALUS: trivial
+    // MALUS: metodi triviali
     if (isTrivial(methodName)) {
       score -= 30;
     } else {
-      // BONUS: metodo "azione"
+      // BONUS: metodo che "sembra azione"
       if (isActionMethod(methodName))
         score += 20;
 
       // BONUS DISCRETO: è proprio l'ultima invocazione su focal prima dell'assert
       if (call.index == lastIdx)
-        score += 10; // ← nuovo bonus
+        score += 10;
     }
 
-    // BONUS continuo: posizione più tarda
+    // BONUS CONTINUO: posizione tarda nel test
     score += call.index;
 
     return score;
@@ -206,7 +239,8 @@ public final class AssertionAwareFocalMethodHeuristic implements FocalMethodHeur
 
   /**
    * Estrae il "core" del nome del test rimuovendo prefissi comuni
-   * (test/should/when) e underscore iniziali.
+   * (test/should/when)
+   * e underscore iniziali.
    */
   private String extractTestNameCore(String testMethodName) {
     if (testMethodName == null)
@@ -258,9 +292,10 @@ public final class AssertionAwareFocalMethodHeuristic implements FocalMethodHeur
         "add", "subtract", "multiply", "divide", "increment", "decrement",
     };
     String lower = methodName.toLowerCase();
-    for (String v : verbs)
+    for (String v : verbs) {
       if (lower.startsWith(v))
         return true;
+    }
     return false;
   }
 

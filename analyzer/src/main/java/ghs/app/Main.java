@@ -71,8 +71,7 @@ public final class Main {
 
                 // Focal method: euristica "assertion-aware" (ASM sul .class del test)
                 // con fallback su una euristica nome+distanza che evita getter/setter.
-                FocalMethodHeuristic methodHeu = new AssertionAwareFocalMethodHeuristic(
-                                new NameAndDistanceFocalMethodHeuristic());
+                FocalMethodHeuristic methodHeu = new AssertionAwareFocalMethodHeuristic();
 
                 // Call-graph helpers:
                 BfsTraverser bfs = new BfsTraverser(); // BFS con potatura librerie (riduce rumore/memoria)

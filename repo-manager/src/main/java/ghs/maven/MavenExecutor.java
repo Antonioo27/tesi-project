@@ -4,7 +4,6 @@ import ghs.config.Settings;
 import ghs.exec.ProcessRunner;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -13,31 +12,28 @@ public final class MavenExecutor {
   public int verify(Path repoDir, Settings s) {
     String mvn = resolveMavenExecutable(repoDir);
     List<String> cmd = List.of(
-      mvn,
-      "-Dmaven.repo.local=" + s.localRepo,
-      "--offline",
-      "-B",
-      "-DskipTests",
-      "verify"
-    );
+        mvn,
+        "-Dmaven.repo.local=" + s.localRepo,
+        "--offline",
+        "-B",
+        "-DskipTests",
+        "verify");
     return ProcessRunner.run(cmd, repoDir, s.buildTimeout());
   }
 
   public ProcessRunner.Result warmup(Path repoDir, Settings s) {
     String mvn = resolveMavenExecutable(repoDir);
     List<String> base = new ArrayList<>(
-      List.of(
-        mvn,
-        "-Dmaven.repo.local=" + s.localRepo,
-        "-B",
-        "-nsu",
-        "-q",
-        "-DincludePlugins=true",
-        "-DincludeVersionedPlugins=true",
-        "-DincludePluginDependencies=true",
-        "dependency:go-offline"
-      )
-    );
+        List.of(
+            mvn,
+            "-Dmaven.repo.local=" + s.localRepo,
+            "-B",
+            "-nsu",
+            "-q",
+            "-DincludePlugins=true",
+            "-DincludeVersionedPlugins=true",
+            "-DincludePluginDependencies=true",
+            "dependency:go-offline"));
     if (!s.warmupProfiles().isEmpty()) {
       base.add(1, "-P" + s.warmupProfiles());
     }
@@ -58,14 +54,14 @@ public final class MavenExecutor {
 
   private static boolean isOnPath(String exe) {
     String path = System.getenv("PATH");
-    if (path == null) return false;
+    if (path == null)
+      return false;
     String sep = System.getProperty("os.name").toLowerCase().contains("win")
-      ? ";"
-      : ":";
+        ? ";"
+        : ":";
     for (String dir : path.split(sep)) {
-      if (
-        java.nio.file.Files.isExecutable(java.nio.file.Paths.get(dir, exe))
-      ) return true;
+      if (java.nio.file.Files.isExecutable(java.nio.file.Paths.get(dir, exe)))
+        return true;
     }
     return false;
   }
