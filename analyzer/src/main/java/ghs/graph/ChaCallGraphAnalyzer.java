@@ -1,220 +1,139 @@
 package ghs.graph;
 
-import ghs.heuristics.FocalClassHeuristic;
-import ghs.heuristics.FocalMethodHeuristic;
-import ghs.heuristics.FocalMethodContext;
-import ghs.heuristics.TestClassifier;
-import ghs.model.CgStats;
-import ghs.model.TestKind;
-import ghs.model.TestRecord;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
+
+import ghs.pipeline.HeuristicEngine;
+import ghs.heuristics.HeuristicContext;
+import ghs.heuristics.HeuristicResult;
+import ghs.model.CgStats;
 import sootup.callgraph.CallGraph;
 import sootup.core.signatures.MethodSignature;
 import sootup.java.core.JavaSootMethod;
 
 /**
- * Analizza un singolo metodo di test usando un call graph CHA.
+ * ChaCallGraphAnalyzer (VERSIONE “COLLECTOR”)
  *
- * Passi:
- * 1) BFS dal metodo di test (limiti: maxDepth, maxVisited, potatura libs sempre
- * attiva).
- * 2) Classificazione UNIT/INTEGRATION (TestClassifier).
- * 3) Se UNIT → stima focal class e delega la scelta del focal method
- * all’euristica
- * (AssertionAwareFocalMethodHeuristic o fallback). La logica "unico diretto"
- * è ora interna all’euristica.
- * 4) Statistiche del grafo + score continuo (UnitIntegrationScorer).
- * 5) Costruzione TestRecord (con testKind e directProjectClasses).
+ * RESPONSABILITÀ (SOLO RACCOLTA DATI GREZZI):
+ * - Esegue BFS limitata dal metodo di test sul call graph (delegando a
+ * BfsTraverser)
+ * - Calcola statistiche strutturali di base (CgStats + lista classi progetto
+ * toccate direttamente)
+ * - Rileva uso di mock (MockUsageDetector)
+ * - Costruisce un HeuristicContext e lancia TUTTE le heuristic registrate
+ * (HeuristicEngine)
+ * - Restituisce un RawTestAnalysis con: metadati test, stats, mock flag,
+ * heuristicResults
+ *
+ * NON FA (delegato a futuri componenti “Combiner/Strategy”):
+ * - Classificazione UNIT/INTEGRATION
+ * - Calcolo score continuo unit_integration
+ * - Selezione focal class / focal method
+ * - Qualsiasi fusione / decisione finale
+ *
+ * Questo consente di sostituire o aggiungere strategie di combinazione senza
+ * toccare la fase di raccolta.
  */
-public final class ChaCallGraphAnalyzer implements CallGraphAnalyzer {
+public final class ChaCallGraphAnalyzer {
 
         private final BfsTraverser bfs;
-        private final MockUsageDetector mocks;
-        private final UnitIntegrationScorer scorer;
-        private final TestClassifier classifier;
+        private final HeuristicEngine heuristicEngine;
 
         public ChaCallGraphAnalyzer(
                         BfsTraverser bfs,
-                        MockUsageDetector mocks,
-                        UnitIntegrationScorer scorer,
-                        TestClassifier classifier) {
-                this.bfs = bfs;
-                this.mocks = mocks;
-                this.scorer = scorer;
-                this.classifier = classifier;
+                        HeuristicEngine heuristicEngine) {
+                this.bfs = Objects.requireNonNull(bfs);
+                this.heuristicEngine = Objects.requireNonNull(heuristicEngine);
         }
 
-        @Override
-        public TestRecord analyzeOne(
+        /**
+         * Esegue la sola raccolta delle evidenze sul singolo metodo di test.
+         *
+         * @param repoName           nome repo
+         * @param modulePath         path modulo
+         * @param cfgId              id configurazione (tracking)
+         * @param cg                 call graph (già costruito altrove)
+         * @param testMethod         metodo di test
+         * @param projectProdClasses FQN classi di produzione
+         * @param projectTestClasses FQN classi di test
+         * @param projectAllClasses  union prod+test (per pruning BFS)
+         * @param maxDepth           limite profondità BFS
+         * @param maxVisited         limite nodi visitati BFS
+         * @return RawTestAnalysis (nessuna decisione finale)
+         */
+        public RawTestAnalysis collect(
                         String repoName,
-                        Path module,
+                        Path modulePath,
                         String cfgId,
                         CallGraph cg,
-                        JavaSootMethod tm,
+                        JavaSootMethod testMethod,
                         Set<String> projectProdClasses,
                         Set<String> projectTestClasses,
                         Set<String> projectAllClasses,
                         int maxDepth,
-                        int maxVisited,
-                        java.util.function.Function<String, String> simpleName,
-                        FocalClassHeuristic classHeu,
-                        FocalMethodHeuristic methodHeu) {
+                        int maxVisited) {
 
-                // === dati base del test ===
-                final MethodSignature testSig = tm.getSignature();
-                final String testClass = testSig.getDeclClassType().getFullyQualifiedName();
-                final String testMethod = testSig.getSubSignature().toString();
+                MethodSignature testSig = testMethod.getSignature();
+                String testClassFqn = testSig.getDeclClassType().getFullyQualifiedName();
+                String testMethodName = testSig.getSubSignature().toString();
 
-                // === 1) BFS dal metodo di test (pruning libs sempre ON) ===
-                Map<MethodSignature, Integer> distance = bfs.bfs(
+                // 1) BFS (solo raccolta distanza)
+                Map<MethodSignature, Integer> dist = bfs.bfs(
                                 cg,
                                 testSig,
                                 maxDepth,
                                 projectAllClasses,
                                 maxVisited);
-                final Map<MethodSignature, Integer> dist = distance; // per lambda
 
-                // Metodi di classi DI PROGETTO raggiunti
+                // Metodi di classi di produzione raggiunti
                 List<MethodSignature> projectTargets = dist.keySet().stream()
-                                .filter(ms -> projectProdClasses.contains(
-                                                ms.getDeclClassType().getFullyQualifiedName()))
+                                .filter(ms -> projectProdClasses
+                                                .contains(ms.getDeclClassType().getFullyQualifiedName()))
                                 .collect(Collectors.toList());
 
-                // Spread su classi di progetto raggiunte
+                // Spread classi produzione
                 Set<String> uniqueProjectClasses = projectTargets.stream()
                                 .map(ms -> ms.getDeclClassType().getFullyQualifiedName())
                                 .collect(Collectors.toCollection(LinkedHashSet::new));
 
-                // Chiamate a librerie (né prod né test del progetto)
-                long callsToLibraries = dist.keySet().stream()
-                                .filter(ms -> !projectProdClasses
-                                                .contains(ms.getDeclClassType().getFullyQualifiedName())
-                                                && !projectTestClasses.contains(
-                                                                ms.getDeclClassType().getFullyQualifiedName()))
-                                .count();
+                // Chiamate a librerie (né prod né test)
+                List<String> libraryClasses = dist.keySet().stream()
+                                .map(ms -> ms.getDeclClassType().getFullyQualifiedName())
+                                .filter(fqn -> !projectProdClasses.contains(fqn)
+                                                && !projectTestClasses.contains(fqn))
+                                .distinct()
+                                .collect(Collectors.toList());
 
-                // Mock usage
-                boolean usesMocks = mocks.usesMocks(cg, testSig);
+                long callsToLibraries = libraryClasses.size();
 
-                // === 2) Classificazione UNIT vs INTEGRATION ===
-                TestClassifier.ClassificationResult cr = classifier.classify(
-                                cg, tm, projectProdClasses, projectTestClasses);
+                // Stampa le classi di libreria
+                // System.out.println("Classi di libreria chiamate: " + libraryClasses);
 
-                // === 3) Focal solo se UNIT ===
-                String focalClassFqn = "";
-                Optional<MethodSignature> focalMethodSig = Optional.empty();
-                long callsToFocal = 0L;
-                long callsToOtherProjectClasses = 0L;
+                // Statistiche strutturali
+                int maxDepthVisited = dist.values().stream().mapToInt(Integer::intValue).max().orElse(0);
 
-                if (cr.kind() == TestKind.UNIT) {
-                        // 3.a) FOCAL CLASS (guess by name → exact match → min distance)
-                        String candidateByName = classHeu.guessFocalClassFromTestName(testClass);
-                        String pkg = testClass.contains(".")
-                                        ? testClass.substring(0, testClass.lastIndexOf('.'))
-                                        : "";
-                        String baseName = simpleName.apply(candidateByName);
-
-                        String exactCandidate = pkg.isEmpty() ? baseName : (pkg + "." + baseName);
-
-                        Optional<String> focalExact = projectProdClasses.contains(exactCandidate)
-                                        ? Optional.of(exactCandidate)
-                                        : Optional.empty();
-
-                        Optional<MethodSignature> byName = projectTargets.stream()
-                                        .filter(ms -> ms.getDeclClassType().getFullyQualifiedName()
-                                                        .endsWith("." + baseName))
-                                        .min(Comparator.comparingInt(dist::get));
-
-                        Optional<String> byMinDistanceClass = projectTargets.stream()
-                                        .collect(Collectors.groupingBy(
-                                                        ms -> ms.getDeclClassType().getFullyQualifiedName(),
-                                                        Collectors.mapping(dist::get,
-                                                                        Collectors.minBy(Integer::compareTo))))
-                                        .entrySet().stream()
-                                        .sorted(Comparator.comparingInt(e -> e.getValue().orElse(Integer.MAX_VALUE)))
-                                        .map(Map.Entry::getKey)
-                                        .findFirst();
-
-                        focalClassFqn = focalExact.orElse(
-                                        byName.map(ms -> ms.getDeclClassType().getFullyQualifiedName())
-                                                        .orElse(byMinDistanceClass.orElse(candidateByName)));
-
-                        final String focalClassFqnFinal = focalClassFqn;
-
-                        // Metodi della focal class (ordinati per distanza)
-                        List<MethodSignature> focalClassMethods = projectTargets.stream()
-                                        .filter(ms -> ms.getDeclClassType().getFullyQualifiedName()
-                                                        .equals(focalClassFqnFinal))
-                                        .sorted(Comparator.comparingInt(dist::get))
-                                        .collect(Collectors.toList());
-
-                        // 3.b) FOCAL METHOD
-                        // Costruisci il contesto completo e delega SEMPRE all’euristica.
-                        // (La regola "unico diretto" viene gestita internamente all’euristica.)
-                        final Set<MethodSignature> directCallsFromTest = cg.callsFrom(testSig).stream()
-                                        .map(call -> call.getTargetMethodSignature())
-                                        .collect(Collectors.toSet());
-
-                        FocalMethodContext ctx = new FocalMethodContext(
-                                        cg,
-                                        tm,
-                                        module,
-                                        focalClassFqnFinal,
-                                        focalClassMethods,
-                                        directCallsFromTest);
-
-                        focalMethodSig = methodHeu.selectFocalMethod(ctx);
-
-                        // 3.c) breakdown chiamate
-                        callsToFocal = focalClassMethods.size();
-                        callsToOtherProjectClasses = projectTargets.size() - callsToFocal;
-                } else {
-                        // INTEGRATION → niente concetto di focal
-                        focalClassFqn = "";
-                        callsToFocal = 0L;
-                        callsToOtherProjectClasses = projectTargets.size();
-                }
-
-                // === 4) Statistiche + Score ===
-                int maxDepthVisited = dist.values().stream()
-                                .mapToInt(Integer::intValue)
-                                .max().orElse(0);
-
-                CgStats stats = new CgStats(
-                                projectTargets.size(),
-                                (int) callsToFocal,
-                                (int) callsToOtherProjectClasses,
-                                (int) callsToLibraries,
-                                uniqueProjectClasses.size(),
-                                maxDepthVisited);
-
-                double score = scorer.score(
-                                new UnitIntegrationScorer.Features(
-                                                cr.directRefsCount(), // classi progetto dirette dal test
-                                                uniqueProjectClasses.size(), // spread BFS
-                                                maxDepthVisited, // profondità
-                                                usesMocks, // mock on/off
-                                                stats.projectCalls(), // invocazioni verso classi progetto
-                                                stats.callsToFocalClass() // quota focal (0 se INTEGRATION)
-                                ));
-
-                // === 5) Output ===
-                return new TestRecord(
+                // 2) Esecuzione heuristics (forniscono candidati / metriche grezze)
+                HeuristicContext hCtx = new HeuristicContext(
                                 repoName,
-                                module.toString(),
-                                cfgId,
-                                testClass,
+                                modulePath,
                                 testMethod,
-                                cr.kind() == TestKind.UNIT ? focalClassFqn : "",
-                                cr.kind() == TestKind.UNIT
-                                                ? focalMethodSig.map(MethodSignature::toString).orElse("")
-                                                : "",
-                                stats,
-                                usesMocks,
-                                score,
-                                cr.kind(),
-                                cr.directProjectClasses());
+                                cg,
+                                projectProdClasses,
+                                projectTestClasses,
+                                maxDepthVisited,
+                                maxVisited);
+
+                List<HeuristicResult> heuristicResults = heuristicEngine.runAll(hCtx);
+
+                // 3) Costruzione raw analysis (campi “decisione” lasciati vuoti / default)
+                return new RawTestAnalysis(
+                                repoName,
+                                modulePath.toString(),
+                                cfgId,
+                                testClassFqn,
+                                testMethodName,
+                                new ArrayList<>(uniqueProjectClasses),
+                                heuristicResults);
         }
 }

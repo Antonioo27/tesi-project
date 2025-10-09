@@ -1,38 +1,53 @@
 package ghs.heuristics;
 
+import java.util.Map;
+import java.util.List;
+
 /**
- * Euristica semplice: deduce la "focal class" dal nome della classe di test.
- * Esempio: com.acme.FooTest -> com.acme.Foo
- *
- * Regole:
- * - rimuove eventuale prefisso "Test" ripetuto (es. TestTestFooTest -> FooTest
- * -> poi rimosso suffix)
- * - rimuove il suffisso tra (Test|Tests|IT|IntTest)
- * - preserva il package originale
- *
- * Nota: l'ordine delle alternative del suffisso, così com'è, può lasciare "Int"
- * in "FooIntTest" (vedi sezione fix sotto).
+ * Heuristica name-based con rimozione dei suffissi in ordine "lungo -> corto".
  */
-public final class NameBasedFocalClassHeuristic implements FocalClassHeuristic {
+public final class NameBasedFocalClassHeuristic implements Heuristic {
 
   @Override
-  public String guessFocalClassFromTestName(String testClassFqn) {
-    int lastDot = testClassFqn.lastIndexOf('.');
-    String pkg = (lastDot >= 0) ? testClassFqn.substring(0, lastDot) : "";
-    String simple = (lastDot >= 0) ? testClassFqn.substring(lastDot + 1) : testClassFqn;
+  public String id() {
+    return "focal-class-name";
+  }
 
-    // Ordine corretto: pattern più lunghi prima, per evitare match parziali
+  @Override
+  public HeuristicResult run(HeuristicContext ctx) {
+    String testFqn = ctx.testMethod().getSignature()
+        .getDeclClassType().getFullyQualifiedName();
+
+    int lastDot = testFqn.lastIndexOf('.');
+    String pkg = lastDot >= 0 ? testFqn.substring(0, lastDot) : "";
+    String simple = lastDot >= 0 ? testFqn.substring(lastDot + 1) : testFqn;
+
+    // Rimozione prefissi/suffissi comuni: prima quelli lunghi, poi i corti
     String base = simple
-        .replaceFirst("^(Test)+", "")
-        .replaceFirst("(IntTest|Tests|Test|IT)$", "");
+        .replaceFirst("^Test+", "")
+        .replaceFirst("IntTest$", "")
+        .replaceFirst("UnitTest$", "")
+        .replaceFirst("Tests$", "")
+        .replaceFirst("Test$", "")
+        .replaceFirst("IT$", "");
 
-    // Fallback: evita di restituire un FQN con nome vuoto
-    if (base.isEmpty()) {
-      base = simple.replaceFirst("(IntTest|Tests|Test|IT)$", "");
-      if (base.isEmpty())
-        base = simple; // ultima spiaggia
-    }
+    if (base.isEmpty())
+      base = simple;
 
-    return pkg.isEmpty() ? base : pkg + "." + base;
+    String candidateFqn = pkg.isEmpty() ? base : pkg + "." + base;
+    boolean exists = ctx.projectProdClasses().contains(candidateFqn);
+    double conf = exists ? 0.8 : 0.4;
+
+    Candidate<String> candidate = new Candidate<>(
+        candidateFqn,
+        conf,
+        "name-derivation",
+        Map.of("existsInProject", exists));
+
+    return new HeuristicResult(
+        id(),
+        "focal-class-candidates",
+        List.of(candidate),
+        Map.of());
   }
 }

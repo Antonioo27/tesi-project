@@ -1,16 +1,17 @@
 package ghs.app;
 
 import ghs.cli.*;
+import ghs.combine.ExampleTestResultCombiner;
+import ghs.combine.TestResultCombiner;
 import ghs.discovery.*;
 import ghs.graph.*;
 import ghs.heuristics.*;
-import ghs.heuristics.EnhancedHybridTestClassifier;
-import ghs.heuristics.TestClassifier;
 import ghs.io.*;
 import ghs.model.*;
 import ghs.pipeline.*;
 import ghs.sootupview.*;
 import java.nio.file.*;
+import java.util.List;
 
 /**
  * Composition root dell'applicazione "Analyzer".
@@ -66,23 +67,19 @@ public final class Main {
                 // ======================
                 // 5) Euristiche e helper di analisi
                 // ======================
-                // Focal class: inferita dal nome del test (es. FooTest -> Foo).
-                FocalClassHeuristic classHeu = new NameBasedFocalClassHeuristic();
 
-                // Focal method: euristica "assertion-aware" (ASM sul .class del test)
-                // con fallback su una euristica nome+distanza che evita getter/setter.
-                FocalMethodHeuristic methodHeu = new AssertionAwareFocalMethodHeuristic();
+                List<Heuristic> heuristics = List.of(
+                                new NameBasedFocalClassHeuristic(),
+                                new AssertionAwareFocalMethodHeuristic(),
+                                new MockUsageHeuristic(),
+                                new DirectCallsMetricHeuristic());
+
+                HeuristicEngine heuristicEngine = new HeuristicEngine(heuristics);
 
                 // Call-graph helpers:
                 BfsTraverser bfs = new BfsTraverser(); // BFS con potatura librerie (riduce rumore/memoria)
-                MockUsageDetector mocks = new MockUsageDetector(); // segnali di Mockito/EasyMock/…
-                UnitIntegrationScorer scorer = new UnitIntegrationScorer(); // score continuo 0..1
 
-                // Classificatore parametrico (soglie da CLI) per UNIT vs INTEGRATION.
-                TestClassifier classifier = new EnhancedHybridTestClassifier(
-                                cfg.integrationMinProjectClasses(),
-                                cfg.integrationMinProjectMethods(),
-                                cfg.highConcentrationThreshold());
+                TestResultCombiner combiner = new ExampleTestResultCombiner();
 
                 // ======================
                 // 6) Strategia di analisi e orchestrazione
@@ -95,12 +92,9 @@ public final class Main {
                 AnalyzerStrategy full = new FullCallGraphStrategy(
                                 viewFactory,
                                 discovery,
-                                classHeu,
-                                methodHeu,
                                 bfs,
-                                mocks,
-                                scorer,
-                                classifier);
+                                heuristicEngine,
+                                combiner);
 
                 // ModuleAnalyzer: warm-up SootUp, discovery test, autotuning batch, resume/OOM
                 // handling.

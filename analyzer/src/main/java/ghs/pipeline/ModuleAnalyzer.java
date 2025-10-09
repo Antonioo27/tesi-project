@@ -96,7 +96,7 @@ public final class ModuleAnalyzer {
     // 6) Auto-tuning per dimensione modulo (no fast)
     Tuning tuning = tune(cfg, testMethods.size());
 
-    // 7) Resume/Progress (cfgId semplificato: niente -F)
+    // 7) Resume/Progress
     String repoName = PathUtil.repoName(baseDir, module);
     String cfgId = String.format(
         Locale.ROOT,

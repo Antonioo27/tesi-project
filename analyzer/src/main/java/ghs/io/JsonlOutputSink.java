@@ -1,38 +1,40 @@
 package ghs.io;
 
 import ghs.model.*;
-import ghs.model.TestRecord;
+import ghs.heuristics.HeuristicResult;
+import ghs.heuristics.Candidate;
 
 import java.io.BufferedWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+
+import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.Map;
+
 /**
- * Output sink che serializza i risultati in formato JSON Lines (JSONL).
+ * Output JSON Lines semplificato:
+ * - Campi principali test (repo, module, testClass, testMethod)
+ * - Classificazione (kind, score, confidence)
+ * - Focal (class, method)
+ * - Sintesi call-graph minimale (uniqueProjectClasses, maxDepth)
+ * - Conteggio classi progetto dirette (non la lista completa)
+ * - Tutte le euristiche con metricId, meta, candidates
+ * (value/confidence/evidence)
  *
- * Modalità:
- * - File unico: --splitByRepo=false → scrive su cfg.outPath()
- * - Split per repo:--splitByRepo=true → crea una dir cfg.outPath()/ e scrive
- * out/<repo>.jsonl
- *
- * Scelte:
- * - JSONL è append-friendly e facilmente processabile a streaming.
- * - In modalità split, i writer sono creati "lazy" per ciascuna repo alla prima
- * write.
- * - La chiusura (close) garantisce flush e rilascio di tutte le risorse.
+ * RIMOSSI come “superflui” rispetto alla richiesta:
+ * - cfgId
+ * - Dettagli granulari cgStats (manteniamo solo 2 campi chiave)
+ * - Lista completa directProjectClasses (sostituita da directProjectClassCount)
+ * - projectProdClassesTouched (non distinta al momento)
  */
 public final class JsonlOutputSink implements OutputSink {
 
-  /** Writer unico quando non si splitta per repo; null in modalità split. */
   private final BufferedWriter writer;
-  /** Flag che indica la modalità di output. */
   private final boolean splitByRepo;
-  /** Percorso del file (file unico) o directory (split). */
   private final Path outPath;
-  // copia di cfg.append() da usare anche in write(...)
   private final boolean appendMode;
-  /** Writer per repo in modalità split (creati on-demand). */
   private final java.util.Map<String, BufferedWriter> byRepo = new java.util.HashMap<>();
 
   public JsonlOutputSink(AnalysisConfig cfg) throws Exception {
@@ -41,12 +43,9 @@ public final class JsonlOutputSink implements OutputSink {
     this.appendMode = cfg.append();
 
     if (!splitByRepo) {
-      // Modalità file unico: assicurati che esista la directory padre di outPath
       Path dir = outPath.toAbsolutePath().getParent();
       if (dir != null)
         Files.createDirectories(dir);
-
-      // Apertura writer con policy di append o truncate in base al flag --append
       this.writer = Files.newBufferedWriter(
           outPath,
           StandardCharsets.UTF_8,
@@ -62,41 +61,61 @@ public final class JsonlOutputSink implements OutputSink {
                   StandardOpenOption.WRITE
               });
     } else {
-      // Modalità split: outPath è una directory contenitore per i file per-repo
       Files.createDirectories(outPath);
-      this.writer = null; // si useranno i writer in byRepo
+      this.writer = null;
     }
   }
 
   @Override
   public void write(TestRecord r) throws Exception {
-    // Costruzione della riga JSON: include anche un oggetto annidato 'cgStats'
+
+    // Oggetto classificazione compatto
+    JSONObject classification = new JSONObject()
+        .put("kind", r.testKind().name())
+        .put("score", r.unitIntegrationScore())
+        .put("confidence", r.classificationConfidence());
+
+    // Oggetto focal
+    JSONObject focal = new JSONObject()
+        .put("class", r.focalClass() == null ? JSONObject.NULL : r.focalClass())
+        .put("method", r.focalMethod() == null ? JSONObject.NULL : r.focalMethod());
+
+    int directCount = (r.directProjectClasses() == null) ? 0 : r.directProjectClasses().size();
+
+    // Heuristics array
+    JSONArray heuristicsArr = new JSONArray();
+    if (r.heuristicResults() != null) {
+      for (HeuristicResult hr : r.heuristicResults()) {
+        JSONArray candArr = new JSONArray();
+        for (Candidate<?> c : hr.candidates()) {
+          candArr.put(new JSONObject()
+              .put("value", c.value() == null ? JSONObject.NULL : c.value().toString())
+              .put("confidence", c.confidence())
+              .put("rationale", c.rationale())
+              .put("evidence", new JSONObject(c.evidence() == null ? Map.of() : c.evidence())));
+        }
+        heuristicsArr.put(new JSONObject()
+            .put("heuristicId", hr.heuristicId())
+            .put("metricId", hr.metricId())
+            .put("meta", new JSONObject(hr.meta() == null ? Map.of() : hr.meta()))
+            .put("candidates", candArr));
+      }
+    }
+
     JSONObject row = new JSONObject()
         .put("repo", r.repo())
-        .put("module", r.module())
-        .put("cfgId", r.cfgId())
+        .put("module", r.module().toString())
         .put("testClass", r.testClass())
         .put("testMethod", r.testMethod())
-        .put("focalClass", r.focalClass())
-        .put("focalMethod", r.focalMethod())
-        .put("cgStats", new JSONObject()
-            .put("projectCalls", r.cgStats().projectCalls())
-            .put("callsToFocalClass", r.cgStats().callsToFocalClass())
-            .put("callsToOtherProjectClasses", r.cgStats().callsToOtherProjectClasses())
-            .put("callsToLibraries", r.cgStats().callsToLibraries())
-            .put("uniqueProjectClasses", r.cgStats().uniqueProjectClasses())
-            .put("maxDepthVisited", r.cgStats().maxDepthVisited()))
-        .put("usesMocks", r.usesMocks())
-        .put("unit_integration_score", r.unitIntegrationScore())
-        .put("testKind", r.testKind()) // enum → serializzato come stringa (es. "UNIT")
-        .put("directProjectClasses", new org.json.JSONArray(r.directProjectClasses()));
+        .put("classification", classification)
+        .put("focal", focal)
+        .put("directProjectClassCount", directCount)
+        .put("heuristics", heuristicsArr);
 
     if (!splitByRepo) {
-      // Scrittura su file unico
       writer.write(row.toString());
-      writer.write("\n"); // JSON Lines = un record per riga
+      writer.write("\n");
     } else {
-      // Scrittura per-repo: ottieni o crea il writer per questa repo
       BufferedWriter w = byRepo.computeIfAbsent(r.repo(), repo -> {
         try {
           Path p = outPath.resolve(repo + ".jsonl");
@@ -116,7 +135,6 @@ public final class JsonlOutputSink implements OutputSink {
           throw new RuntimeException(e);
         }
       });
-
       w.write(row.toString());
       w.write("\n");
     }
@@ -124,16 +142,12 @@ public final class JsonlOutputSink implements OutputSink {
 
   @Override
   public void close() throws Exception {
-    // Chiudi il writer unico, se presente
     if (writer != null)
       writer.close();
-
-    // Chiudi tutti i writer per repo (split)
     for (BufferedWriter w : byRepo.values()) {
       try {
         w.close();
       } catch (Exception ignored) {
-        // best-effort: continuiamo a chiuderli tutti
       }
     }
   }
