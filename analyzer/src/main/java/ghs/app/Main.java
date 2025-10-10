@@ -91,7 +91,6 @@ public final class Main {
                 // - calcola score + classificazione
                 AnalyzerStrategy full = new FullCallGraphStrategy(
                                 viewFactory,
-                                discovery,
                                 bfs,
                                 heuristicEngine,
                                 combiner);

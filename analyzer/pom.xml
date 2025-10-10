@@ -13,6 +13,7 @@
     <maven.compiler.source>17</maven.compiler.source>
     <maven.compiler.target>17</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
     <sootup.version>2.0.0</sootup.version>
     <javaparser.version>3.25.10</javaparser.version>
   </properties>
@@ -47,6 +48,7 @@
       <version>20240303</version>
     </dependency>
 
+    <!-- JavaParser -->
     <dependency>
       <groupId>com.github.javaparser</groupId>
       <artifactId>javaparser-core</artifactId>
@@ -54,13 +56,8 @@
     </dependency>
     <dependency>
       <groupId>com.github.javaparser</groupId>
-      <artifactId>javaparser-core</artifactId>
-      <version>3.25.10</version>
-    </dependency>
-    <dependency>
-      <groupId>com.github.javaparser</groupId>
       <artifactId>javaparser-symbol-solver-core</artifactId>
-      <version>3.25.10</version>
+      <version>${javaparser.version}</version>
     </dependency>
 
     <!-- Silenzia l'avviso SLF4J "no providers" -->
@@ -71,7 +68,8 @@
       <scope>runtime</scope>
     </dependency>
 
-     <dependency>
+    <!-- ASM (se necessario per ispezioni bytecode) -->
+    <dependency>
       <groupId>org.ow2.asm</groupId>
       <artifactId>asm</artifactId>
       <version>9.6</version>
@@ -84,6 +82,37 @@
   </dependencies>
 
   <build>
+    <!-- Mappatura per m2e (Eclipse): ignora il goal copy-dependencies in workspace
+         per evitare lock dei JAR su Windows. Da CLI "mvn package" funziona come sempre. -->
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.eclipse.m2e</groupId>
+          <artifactId>lifecycle-mapping</artifactId>
+          <version>1.0.0</version>
+          <configuration>
+            <lifecycleMappingMetadata>
+              <pluginExecutions>
+                <pluginExecution>
+                  <pluginExecutionFilter>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-dependency-plugin</artifactId>
+                    <versionRange>[3.6.1,)</versionRange>
+                    <goals>
+                      <goal>copy-dependencies</goal>
+                    </goals>
+                  </pluginExecutionFilter>
+                  <action>
+                    <ignore/>
+                  </action>
+                </pluginExecution>
+              </pluginExecutions>
+            </lifecycleMappingMetadata>
+          </configuration>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -113,9 +142,12 @@
           <execution>
             <id>copy-dependencies</id>
             <phase>prepare-package</phase>
-            <goals><goal>copy-dependencies</goal></goals>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
             <configuration>
               <outputDirectory>${project.build.directory}/dependency</outputDirectory>
+              <overWriteIfNewer>true</overWriteIfNewer>
             </configuration>
           </execution>
         </executions>

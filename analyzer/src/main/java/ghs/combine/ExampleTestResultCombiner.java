@@ -1,8 +1,8 @@
 package ghs.combine;
 
 import ghs.graph.RawTestAnalysis;
-import ghs.heuristics.HeuristicResult;
 import ghs.heuristics.Candidate;
+import ghs.heuristics.HeuristicResult;
 import ghs.model.TestKind;
 import ghs.model.TestRecord;
 
@@ -14,36 +14,42 @@ import java.util.Map;
 
 /**
  * Combiner senza CgStats.
+ *
  * - Fonde segnali: assertion_focal_producers (forte) + name-based (debole) +
  * direct_calls (debole)
- * - Calcola interactionScore da direct_calls_metrics; fallback su numero classi
- * toccate
- * - Penalità/boost in base a mock usage
+ * - Calcola interactionScore da direct_calls_metrics; in assenza usa un
+ * fallback costruito
+ * dalle asserzioni (distribution di assertion_focal_producers).
+ * - Penalità/boost in base a mock usage.
  * - Classificazione UNIT/INTEGRATION senza cg stats (usa
- * uniqueClassCount/totalMethodCalls)
+ * uniqueClassCount/totalMethodCalls).
+ *
+ * Nota: per ridurre la ridondanza, NON utilizziamo più directProjectClasses nel
+ * TestRecord.
+ * Tutte le informazioni necessarie arrivano dalle euristiche.
  */
 public final class ExampleTestResultCombiner implements TestResultCombiner {
 
   private static final double FALLBACK_MOCK_PENALTY = 0.15;
-  private static final int HARD_CAP_BASE = 6;
 
   @Override
   public TestRecord combine(RawTestAnalysis raw) {
 
+    // 1) Focal signals
     String focalClass = detectFusedFocalClass(raw.heuristicResults());
     String focalMethod = detectFocalMethod(raw.heuristicResults());
 
-    var directSet = new LinkedHashSet<>(raw.directProjectClasses() == null
-        ? List.<String>of()
-        : raw.directProjectClasses());
-    var touchedSet = directSet;
-    int touched = directSet.size();
-
-    // --- Estrai direct_calls metrics ---
+    // 2) Metriche "dirette" dal call graph (livello 1). Se non disponibili, usiamo
+    // il fallback dalle asserzioni.
     DirectMetrics dm = extractDirectCallsMetrics(raw.heuristicResults());
+    if (dm == null) {
+      dm = fallbackFromProducers(raw.heuristicResults()); // <-- nuovo fallback che ricostruisce
+                                                          // total/unique/concentration
+    }
 
-    // --- Calcolo interactionScore da direct_calls_metrics (fallback su touched)
-    // ---
+    // 3) Interaction score (normalizzato 0..1)
+    // Base: volume (totalMethodCalls) + piccolo boost/penalty in base alla
+    // concentrazione per classe.
     Double interactionScore;
     if (dm != null && dm.totalMethodCalls != null) {
       double baseVol = Math.min(1.0, dm.totalMethodCalls / 16.0);
@@ -52,37 +58,38 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
           : 0.0;
       interactionScore = clamp01(baseVol + focusBoost);
     } else {
-      double base = touched + Math.max(0, touched - 1) * 0.5; // 1, 1.5, 2.0, ...
-      interactionScore = Math.min(1.0, base / HARD_CAP_BASE);
+      // Davvero nessuna metrica disponibile (né direct_calls né fallback asserzioni)
+      interactionScore = 0.00;
     }
 
-    // --- Mock usage stats ---
+    // 4) Mock usage: penalità e boost (se non ci sono mock, premiamo spread/volume)
     MockStats ms = extractMockStats(raw.heuristicResults());
 
-    // Penalità mock
     double mockPenalty = computeMockPenalty(ms);
-    if (mockPenalty > 0)
+    if (mockPenalty > 0) {
       interactionScore = Math.max(0.0, interactionScore - mockPenalty);
+    }
 
-    // Boost soft se non ci sono mock: più classi/volumi -> verso integrazione
+    // Boost "soft" in assenza di mock: più classi e più volume => più probabile
+    // integrazione
     if (!ms.hasMocks) {
-      int unique = dm != null && dm.uniqueClassCount != null ? dm.uniqueClassCount : touched;
-      int total = dm != null && dm.totalMethodCalls != null ? dm.totalMethodCalls : touched;
+      int unique = dm != null && dm.uniqueClassCount != null ? dm.uniqueClassCount : 0;
+      int total = dm != null && dm.totalMethodCalls != null ? dm.totalMethodCalls : 0;
       double spreadBoost = Math.min(0.15, Math.max(0, unique - 1) * 0.05); // fino a +0.15
       double volumeBoost = Math.min(0.10, Math.max(0, total - 3) * 0.02); // fino a +0.10
       interactionScore = clamp01(interactionScore + spreadBoost + volumeBoost);
     }
 
-    // Pavimento per stabilità
+    // Pavimento per stabilità numerica
     interactionScore = Math.max(interactionScore, 0.05);
 
-    // --- Classificazione ---
-    int unique = dm != null && dm.uniqueClassCount != null ? dm.uniqueClassCount : touched;
-    int total = dm != null && dm.totalMethodCalls != null ? dm.totalMethodCalls : touched;
+    // 5) Classificazione finale
+    int unique = dm != null && dm.uniqueClassCount != null ? dm.uniqueClassCount : 0;
+    int total = dm != null && dm.totalMethodCalls != null ? dm.totalMethodCalls : 0;
     TestKind kind = classify(interactionScore, unique, total, ms);
     double conf = classificationConfidence(interactionScore, kind);
 
-    // ATTENZIONE: adegua la signature del tuo TestRecord se differisce
+    // 6) Output: TestRecord compatibile con la tua firma "snellita"
     return new TestRecord(
         raw.repo(),
         Path.of(raw.module()),
@@ -94,13 +101,20 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
         interactionScore,
         kind,
         conf,
-        directSet,
-        touchedSet,
         raw.heuristicResults());
   }
 
   // -------------------- Fusion focal class --------------------
 
+  /**
+   * Fonde i segnali di classe focale da:
+   * - Producers (assertion_focal_producers) [forte]
+   * - Name-based [debole, ma utile]
+   * - Direct-calls share [debole]
+   *
+   * In caso di pari merito: preferisce classi viste nei producers, poi la
+   * name-based esistente, poi alfabetico.
+   */
   private String detectFusedFocalClass(List<HeuristicResult> results) {
     final double W_PROD = 0.65;
     final double W_NAME = 0.25;
@@ -119,7 +133,7 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
     if (hrProd != null) {
       if (!hrProd.candidates().isEmpty()) {
         for (var c : hrProd.candidates()) {
-          String m = String.valueOf(c.value()); // "<FQN: ...>"
+          String m = String.valueOf(c.value()); // esempio: "<com.example.Foo: void bar(int)>"
           String cls = classFromMethodSigString(m);
           if (cls != null) {
             score.merge(cls, W_PROD * c.confidence(), Double::sum);
@@ -127,6 +141,8 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
           }
         }
       } else {
+        // Se non ci sono candidati ma esiste la distribution per metodo -> ripartisci
+        // peso per classe
         Object distObj = hrProd.meta().get("distribution");
         if (distObj instanceof Map<?, ?> dist) {
           Map<String, Long> byClass = new java.util.LinkedHashMap<>();
@@ -154,7 +170,9 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
     // 2) Name-based
     HeuristicResult hrName = results.stream()
         .filter(r -> "focal-class-candidates".equals(r.metricId()))
-        .findFirst().orElse(null);
+        .findFirst()
+        .orElse(null);
+
     if (hrName != null && !hrName.candidates().isEmpty()) {
       var c = hrName.candidates().get(0);
       Object v = c.value();
@@ -169,6 +187,9 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
 
     // 3) Direct-calls share
     DirectMetrics dm = extractDirectCallsMetrics(results);
+    if (dm == null) {
+      dm = fallbackFromProducers(results); // anche qui, se serve, prova il fallback per dare un minimo di share
+    }
     if (dm != null && dm.perClass != null && dm.totalMethodCalls != null && dm.totalMethodCalls > 0) {
       double total = dm.totalMethodCalls.doubleValue();
       for (var e : dm.perClass.entrySet()) {
@@ -197,6 +218,11 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
     return top.stream().sorted().findFirst().orElse(null);
   }
 
+  /**
+   * Estrae la FQN della classe dalla stringa di signature del metodo
+   * prevista nei Candidate dei producers (es. "<com.example.Foo: void
+   * bar(int)>").
+   */
   private static String classFromMethodSigString(String s) {
     int lt = s.indexOf('<');
     int colon = s.indexOf(':');
@@ -206,6 +232,11 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
     return s.substring(start, colon).trim();
   }
 
+  /**
+   * Stima del metodo focale: prende il primo candidato da una metrica
+   * "method-like"
+   * (in genere dall'euristica dei producers).
+   */
   private String detectFocalMethod(List<HeuristicResult> results) {
     HeuristicResult hr = results.stream()
         .filter(r -> {
@@ -224,6 +255,10 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
 
   // -------------------- Metrics extraction --------------------
 
+  /**
+   * Pacchetto di metriche che uniforma sia i dati reali (direct_calls_metrics)
+   * sia il fallback ricostruito dalle asserzioni.
+   */
   private static final class DirectMetrics {
     final Integer totalMethodCalls;
     final Integer uniqueClassCount;
@@ -238,6 +273,9 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
     }
   }
 
+  /**
+   * Estrae le metriche da "direct_calls_metrics".
+   */
   @SuppressWarnings("unchecked")
   private DirectMetrics extractDirectCallsMetrics(List<HeuristicResult> results) {
     HeuristicResult hr = results.stream()
@@ -246,6 +284,7 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
         .orElse(null);
     if (hr == null || hr.candidates().isEmpty())
       return null;
+
     Map<String, Object> ev = hr.candidates().get(0).evidence();
     Integer total = ev.get("totalMethodCalls") instanceof Number n ? n.intValue() : null;
     Integer unique = ev.get("uniqueClassCount") instanceof Number n ? n.intValue() : null;
@@ -253,8 +292,62 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
     Map<String, Number> per = ev.get("perClass") instanceof Map<?, ?> m
         ? (Map<String, Number>) (Map<?, ?>) m
         : null;
+
     return new DirectMetrics(total, unique, conc, per);
   }
+
+  /**
+   * Fallback: se non abbiamo "direct_calls_metrics", ricostruiamo una vista
+   * simile
+   * usando la distribution di "assertion_focal_producers".
+   *
+   * Logica:
+   * - distribution: Map<MethodSignatureString, Long>
+   * - raggruppa per classe (estraendola dalla firma del metodo)
+   * - total = somma occorrenze
+   * - unique = numero classi
+   * - concentration = max(byClass.values)/total (come nella direct metric)
+   */
+  @SuppressWarnings("unchecked")
+  private DirectMetrics fallbackFromProducers(List<HeuristicResult> results) {
+    HeuristicResult hrProd = results.stream()
+        .filter(r -> "assertion_focal_producers".equals(r.metricId()))
+        .findFirst().orElse(null);
+    if (hrProd == null)
+      return null;
+
+    Object distObj = hrProd.meta().get("distribution");
+    if (!(distObj instanceof Map<?, ?> dist))
+      return null;
+
+    Map<String, Long> byClass = new java.util.LinkedHashMap<>();
+    long total = 0L;
+
+    for (var e : dist.entrySet()) {
+      String m = String.valueOf(e.getKey()); // "<FQN: ...>"
+      String cls = classFromMethodSigString(m); // estrae FQN della classe
+      if (cls == null)
+        continue;
+      long occ = ((Number) e.getValue()).longValue();
+      byClass.merge(cls, occ, Long::sum);
+      total += occ;
+    }
+    if (total <= 0)
+      return null;
+
+    int unique = byClass.size();
+    double concentration = (unique <= 1)
+        ? 1.0
+        : byClass.values().stream().mapToLong(Long::longValue).max().orElse(0L) / (double) total;
+
+    Map<String, Number> per = new java.util.LinkedHashMap<>();
+    for (var e : byClass.entrySet())
+      per.put(e.getKey(), e.getValue());
+
+    return new DirectMetrics((int) total, unique, concentration, per);
+  }
+
+  // -------------------- Mock usage --------------------
 
   private static final class MockStats {
     final boolean hasMocks;
@@ -278,6 +371,10 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
     }
   }
 
+  /**
+   * Estrae il riepilogo d'uso dei mock dall'euristica "mock_usage".
+   * Aggrega verifications/stubbings/verifyInvocations sommando i candidati.
+   */
   private MockStats extractMockStats(List<HeuristicResult> results) {
     HeuristicResult hr = results.stream()
         .filter(r -> "mock_usage".equals(r.metricId()))
@@ -306,13 +403,22 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
 
   // -------------------- Score & classification --------------------
 
+  /**
+   * Penalità per uso di mock:
+   * - più mock => più penalità (basePenalty cresce con mockCount)
+   * - se la quota di verifications è alta, riduciamo la penalità (verifyFactor <
+   * 1)
+   * - clamp massimo 0.30
+   */
   private double computeMockPenalty(MockStats ms) {
     if (!ms.hasMocks || ms.mockCount <= 0)
       return 0.0;
     try {
       double verificationRatio = ms.verificationRatio();
       double basePenalty = 0.10 + 0.035 * Math.max(0, ms.mockCount - 1);
-      double verifyFactor = (verificationRatio >= 0.45) ? 0.55 : (verificationRatio >= 0.25) ? 0.75 : 1.0;
+      double verifyFactor = (verificationRatio >= 0.45) ? 0.55
+          : (verificationRatio >= 0.25) ? 0.75
+              : 1.0;
       double computed = basePenalty * verifyFactor;
       return Math.min(0.30, Math.max(0.0, computed));
     } catch (Exception e) {
@@ -320,6 +426,12 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
     }
   }
 
+  /**
+   * Regole di classificazione:
+   * - Mock “forti” + bassa interazione/ampiezza => UNIT
+   * - Nessun mock + ampiezza/volume sufficienti => INTEGRATION
+   * - Altrimenti, fallback su soglie di unique/norm
+   */
   private TestKind classify(double norm, int unique, int total, MockStats ms) {
     // Unit forte: presenza mock + stubbing/verifiche
     if (ms.hasMocks && (ms.stubbings > 0 || ms.verifications > 0 || ms.verifyInvocations > 0)) {
@@ -343,6 +455,13 @@ public final class ExampleTestResultCombiner implements TestResultCombiner {
     return TestKind.INTEGRATION;
   }
 
+  /**
+   * Confidenza della classificazione:
+   * - più il punteggio norm è vicino al "centro" del tipo (0.35=UNIT,
+   * 0.65=INTEGRATION),
+   * più la confidenza cresce.
+   * - range clampato in [0.5..0.95].
+   */
   private double classificationConfidence(double norm, TestKind kind) {
     double center = (kind == TestKind.UNIT) ? 0.35 : 0.65;
     double dist = 1.0 - Math.min(1.0, Math.abs(norm - center) * 2.0);

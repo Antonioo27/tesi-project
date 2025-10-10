@@ -41,11 +41,6 @@ public final class CliParser {
     int preflightMinHeadroomMb = getInt(m, "preflightMinHeadroomMb", 1500);
     boolean skipOnOom = getBool(m, "skipOnOom", true);
 
-    // 3) Soglie per la classificazione dei test (UNIT/INTEGRATION)
-    int integrationMinProjectClasses = getInt(m, "integrationMinProjectClasses", 2);
-    int integrationMinProjectMethods = getInt(m, "integrationMinProjectMethods", 6);
-    double highConcentrationThreshold = getDouble(m, "highConcentrationThreshold", 0.8);
-
     // 4) Flag con priorità CLI → ENV (se CLI presente, vince la CLI)
     // Nota: 'resume' di default è true; 'resumeReset' di default è false.
     boolean resume = m.containsKey("resume")
@@ -98,10 +93,7 @@ public final class CliParser {
         onlyFrom,
         preflightN,
         preflightMinHeadroomMb,
-        skipOnOom,
-        integrationMinProjectClasses,
-        integrationMinProjectMethods,
-        highConcentrationThreshold);
+        skipOnOom);
   }
 
   // ====== Helpers ======

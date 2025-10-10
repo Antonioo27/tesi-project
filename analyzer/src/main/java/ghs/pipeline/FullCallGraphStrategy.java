@@ -1,14 +1,11 @@
 package ghs.pipeline;
 
-import ghs.discovery.TestDiscovery;
 import ghs.graph.*;
-import ghs.heuristics.*;
 import ghs.model.*;
 import ghs.sootupview.ViewFactory;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 import sootup.callgraph.CallGraph;
 import sootup.callgraph.ClassHierarchyAnalysisAlgorithm;
@@ -28,18 +25,15 @@ import ghs.combine.TestResultCombiner;
 public final class FullCallGraphStrategy implements AnalyzerStrategy {
 
   private final ViewFactory viewFactory;
-  private final TestDiscovery discovery;
   private final ChaCallGraphAnalyzer analyzer;
   private final TestResultCombiner combiner;
 
   public FullCallGraphStrategy(
       ViewFactory viewFactory,
-      TestDiscovery discovery,
       BfsTraverser bfs,
       HeuristicEngine heuristicEngine,
       TestResultCombiner combiner) {
     this.viewFactory = viewFactory;
-    this.discovery = discovery;
     this.combiner = combiner;
     this.analyzer = new ChaCallGraphAnalyzer(bfs, heuristicEngine);
   }

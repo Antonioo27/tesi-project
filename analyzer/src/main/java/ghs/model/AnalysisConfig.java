@@ -29,10 +29,7 @@ public record AnalysisConfig(
     String onlyFromFile,
     int preflightN,
     int preflightMinHeadroomMb,
-    boolean skipOnOom,
-    int integrationMinProjectClasses,
-    int integrationMinProjectMethods,
-    double highConcentrationThreshold) {
+    boolean skipOnOom) {
   public static AnalysisConfig from(CliOptions o) {
     return new AnalysisConfig(
         o.base().toString(),
@@ -55,9 +52,6 @@ public record AnalysisConfig(
         o.onlyFrom().map(java.nio.file.Path::toString).orElse(""),
         o.preflightN(),
         o.preflightMinHeadroomMb(),
-        o.skipOnOom(),
-        o.integrationMinProjectClasses(),
-        o.integrationMinProjectMethods(),
-        o.highConcentrationThreshold());
+        o.skipOnOom());
   }
 }

@@ -9,12 +9,11 @@ import ghs.heuristics.HeuristicResult;
  * score, kind, ecc.).
  */
 public record RawTestAnalysis(
-        String repo,
-        String module,
-        String cfgId,
-        String testClass,
-        String testMethod,
-        List<String> directProjectClasses, // elenco classi progetto toccate (direttamente o raccolta definita)
-        List<HeuristicResult> heuristicResults // output uniforme delle heuristic
+                String repo,
+                String module,
+                String cfgId,
+                String testClass,
+                String testMethod,
+                List<HeuristicResult> heuristicResults // output uniforme delle heuristic
 ) {
 }

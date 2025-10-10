@@ -19,41 +19,27 @@ import java.util.*;
  * - Autotune: autoTune, bigThr/hugeThr, autoBatch/autoVisited*
  * - Filtro repo: onlyFrom
  * - Robustezza: preflightN, preflightMinHeadroomMb, skipOnOom
- * - Classificazione test: integrationMinProjectClasses,
- * integrationMinProjectMethods, highConcentrationThreshold
- *
- * Nota: i tre parametri finali controllano la distinzione UNIT vs INTEGRATION:
- * - integrationMinProjectClasses: # minimo di classi di produzione chiamate
- * direttamente per considerare il test "integration".
- * - integrationMinProjectMethods: # minimo di metodi (diretti) su produzione
- * oltre cui anche una sola classe può sembrare integration-like.
- * - highConcentrationThreshold: soglia [0..1] per considerare "alta" la
- * concentrazione delle chiamate su una singola classe (favorisce UNIT).
  */
 public record CliOptions(
-        Path base,
-        Path out,
-        int maxDepth,
-        int maxVisited,
-        boolean append,
-        boolean splitByRepo,
-        int batchSize,
-        boolean resume,
-        boolean resumeReset,
-        int batchesPerView,
-        boolean autoTune,
-        int bigThr,
-        int hugeThr,
-        int autoBatchBig,
-        int autoBatchHuge,
-        int autoVisitedBig,
-        int autoVisitedHuge,
-        Optional<Path> onlyFrom,
-        int preflightN,
-        int preflightMinHeadroomMb,
-        boolean skipOnOom,
-        int integrationMinProjectClasses,
-        int integrationMinProjectMethods, // minimum method calls for integration classification
-        double highConcentrationThreshold // threshold for high concentration (0.0-1.0)
-) {
+                Path base,
+                Path out,
+                int maxDepth,
+                int maxVisited,
+                boolean append,
+                boolean splitByRepo,
+                int batchSize,
+                boolean resume,
+                boolean resumeReset,
+                int batchesPerView,
+                boolean autoTune,
+                int bigThr,
+                int hugeThr,
+                int autoBatchBig,
+                int autoBatchHuge,
+                int autoVisitedBig,
+                int autoVisitedHuge,
+                Optional<Path> onlyFrom,
+                int preflightN,
+                int preflightMinHeadroomMb,
+                boolean skipOnOom) {
 }

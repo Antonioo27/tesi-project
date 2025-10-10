@@ -7,7 +7,6 @@ import java.util.stream.Collectors;
 import ghs.pipeline.HeuristicEngine;
 import ghs.heuristics.HeuristicContext;
 import ghs.heuristics.HeuristicResult;
-import ghs.model.CgStats;
 import sootup.callgraph.CallGraph;
 import sootup.core.signatures.MethodSignature;
 import sootup.java.core.JavaSootMethod;
@@ -133,7 +132,6 @@ public final class ChaCallGraphAnalyzer {
                                 cfgId,
                                 testClassFqn,
                                 testMethodName,
-                                new ArrayList<>(uniqueProjectClasses),
                                 heuristicResults);
         }
 }

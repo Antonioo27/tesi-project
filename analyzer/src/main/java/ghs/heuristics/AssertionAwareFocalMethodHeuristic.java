@@ -21,8 +21,6 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import javax.management.relation.Role;
-
 /**
  * AssertionAwareFocalMethodHeuristic (AST + SymbolSolving).
  *
@@ -53,8 +51,11 @@ import javax.management.relation.Role;
  * NOTE:
  * - Richiede dipendenze: javaparser-core + javaparser-symbol-solver.
  * - Risoluzione best-effort: se un metodo non viene risolto / non mappato nel
- * call graph → ignorato.
- * - Matching firma: (declaringClassFqn, methodName, paramCount).
+ * call graph → (PATCH) ora usiamo un fallback testuale così da non perdere il
+ * segnale.
+ * - Matching firma: (declaringClassFqn, methodName, paramCount). (PATCH) Match
+ * elastico (name+arity)
+ * se il match rigido fallisce ed esiste un solo candidato nel pool diretto.
  */
 public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
 
@@ -80,7 +81,7 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
     configureSymbolSolver(ctx.modulePath());
 
     // 3) Parse AST
-    CompilationUnit cu; // variabile che conterra' l'AST radice
+    CompilationUnit cu; // variabile che conterrà l'AST radice
     try {
       cu = StaticJavaParser.parse(sourceFile);
     } catch (IOException e) {
@@ -89,7 +90,7 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
       return empty("parse_failure");
     }
 
-    // Una volta parsata le classi di test, andiamo a trovare il metodo nell AST
+    // Una volta parsate le classi di test, andiamo a trovare il metodo nell'AST
     // dato il nome del metodo di test
     Optional<MethodDeclaration> maybeMd = cu.findAll(MethodDeclaration.class).stream()
         .filter(m -> m.getNameAsString().equals(testMethodName))
@@ -99,48 +100,54 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
       return empty("method_not_found_in_source");
     MethodDeclaration md = maybeMd.get();
 
+    // Mappa con i tipi locali (solo simple name): es. model -> GCModel
+    Map<String, String> localTypes = collectLocalTypes(md);
+
     // Lista delle asserzioni trovate nel test
     List<AssertSite> asserts = collectAsserts(md);
     if (asserts.isEmpty())
       return empty("no_assertions_found");
 
     CallGraph cg = ctx.callGraph();
-    // Lista di metodi che il CHA vede chiamati dal test
+    // Lista di metodi che il CHA vede chiamati dal test (diretti, livello 1)
     List<MethodSignature> outgoingFromTest = cg.callsFrom(testSig).stream()
         .map(edge -> edge.getTargetMethodSignature())
         .collect(Collectors.toList());
 
-    // Costruiamo un indice per il match rapido : Index: FQN → methodName →
-    // List<MethodSignature>, raggruppiamo per nome della classe chiamata, poi
-    // metodi appartenenti a quella classe e lista di metodi chiamati dal metododo
-    // in considerazione
+    // Costruiamo un indice per il match rapido:
+    // Index: FQN → methodName → List<MethodSignature>
+    // (raggruppiamo per classe e poi per nome)
     Map<String, Map<String, List<MethodSignature>>> index = buildIndex(outgoingFromTest);
 
-    // Lista producers sono il conteggio di quante volte una specifica
-    // MethodSignature
-    // (cioè un metodo prod ben identificato da FQN) è stata catturata
-    // durante la scansione di tutti gli argomenti di tutti gli assert nel metodo di
-    // test corrente.
-    Map<MethodSignature, ProducerInfo> producers = new LinkedHashMap<>();
+    // (PATCH) Mappa dei producers: accettiamo sia MethodSignature (CG) che firma
+    // testuale fallback.
+    // Questo evita di perdere i producer annidati in lambda (es. assertThrows).
+    Map<Object, ProducerInfo> producers = new LinkedHashMap<>();
 
     for (AssertSite as : asserts) {
       for (Expression arg : as.arguments()) {
 
+        // 1) argomento = chiamata diretta
         if (arg.isMethodCallExpr()) {
-          processMethodCall(arg.asMethodCallExpr(), Role.DIRECT, null, ctx, index, producers);
+          processMethodCall(arg.asMethodCallExpr(), Role.DIRECT, null, ctx, index, producers, testFqn, localTypes);
           continue;
         }
 
+        // 2) argomento = variabile → risaliamo al producer (assegnazione/dichiarazione
+        // con method call)
         if (arg.isNameExpr()) {
           String var = arg.asNameExpr().getNameAsString();
           findProducerOfVar(as.block(), as.localIndex(), var)
-              .ifPresent(mc -> processMethodCall(mc, Role.VARIABLE_PRODUCER, var, ctx, index, producers));
+              .ifPresent(
+                  mc -> processMethodCall(mc, Role.VARIABLE_PRODUCER, var, ctx, index, producers, testFqn, localTypes));
         }
 
-        // eventuali chiamate annidate con scope (es. obj.foo().bar())
+        // 3) (fallback) cerca eventuali chiamate annidate con scope presente dentro
+        // l’espressione
+        // (es. catene obj.foo().bar())
         arg.findAll(MethodCallExpr.class, mc -> mc.getScope().isPresent()).stream()
             .findFirst()
-            .ifPresent(mc -> processMethodCall(mc, Role.DIRECT, null, ctx, index, producers));
+            .ifPresent(mc -> processMethodCall(mc, Role.DIRECT, null, ctx, index, producers, testFqn, localTypes));
       }
     }
 
@@ -153,7 +160,7 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
     List<Candidate<?>> candidates;
 
     // blocco costruisce la lista di candidates da restituire nell’HeuristicResult,
-    // partendo dalla mappa producers (MethodSignature → ProducerInfo).
+    // partendo dalla mappa producers (Object → ProducerInfo).
     if (producers.size() == 1) {
       var e = producers.entrySet().iterator().next();
       ProducerInfo pi = e.getValue();
@@ -161,15 +168,15 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
           evidence(pi, maxOcc, asserts.size(), true)));
     } else {
       candidates = producers.entrySet().stream()
-          // ordina producer
+          // ordina producer per occorrenze desc, poi per stringa chiave
           .sorted((a, b) -> {
             int cmp = Long.compare(b.getValue().occurrences, a.getValue().occurrences);
             return (cmp != 0) ? cmp : a.getKey().toString().compareTo(b.getKey().toString());
           })
           .map(e -> {
             ProducerInfo pi = e.getValue();
-            // se ci sono piu' producer calcoliamo la confidenza in base al ruolo e al
-            // numero di occorrenze
+            // se ci sono più producer calcoliamo la confidenza in base al ruolo e al
+            // numero di occorrenze (+0.05 per ripetizione, cap a 1.0)
             double conf = baseConfidence(pi.role);
             if (pi.occurrences > 1)
               conf = Math.min(1.0, conf + (pi.occurrences - 1) * 0.05);
@@ -196,42 +203,159 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
             "maxSecurityConfidence", round3(max)));
   }
 
-  private void processMethodCall(MethodCallExpr mc, Role role, String varName,
+  /**
+   * (PATCH) processMethodCall: ora supporta
+   * - match "rigido" su CG
+   * - match "elastico" (name+arity) se unico
+   * - fallback testuale se l’indice CG non permette mapping (es. lambda in
+   * assertThrows)
+   */
+  private void processMethodCall(MethodCallExpr mc,
+      Role role,
+      String varName,
       HeuristicContext ctx,
       Map<String, Map<String, List<MethodSignature>>> index,
-      Map<MethodSignature, ProducerInfo> producers) {
+      Map<Object, ProducerInfo> producers,
+      String testFqn,
+      Map<String, String> localTypes) {
 
-    // Qua trova il metodo di produzione invocato dal test, e lo mette nella
-    // variabile resolved
-    Optional<ResolvedMethodDeclaration> resolved = resolveSafely(mc);
-    if (resolved.isEmpty())
+    // NON riassegniamo 'mc': creiamo un nuovo riferimento 'target' da usare ovunque
+    final MethodCallExpr target = pickProjectOwnedCall(mc, ctx, index, testFqn);
+
+    // Prova la risoluzione simbolica
+    Optional<ResolvedMethodDeclaration> resolved = resolveSafely(target);
+    if (resolved.isEmpty()) {
+      // --- Fallback “no-resolve” #1: scope è una variabile locale -----------------
+      // es: "model.size()" -> scope "model" -> localTypes.get("model") == "GCModel"
+      Optional<String> maybeScopeVar = target.getScope()
+          .filter(Expression::isNameExpr)
+          .map(s -> s.asNameExpr().getNameAsString());
+
+      if (maybeScopeVar.isPresent()) {
+        String scopeVar = maybeScopeVar.get();
+        String typeSimple = localTypes.get(scopeVar); // es. "GCModel"
+        if (typeSimple != null) {
+          // Cerca nell'indice le classi col simple name uguale e lo stesso metodo+arity
+          List<MethodSignature> pool = new ArrayList<>();
+          for (var e : index.entrySet()) {
+            String fqn = e.getKey();
+            String simple = fqn.substring(fqn.lastIndexOf('.') + 1);
+            if (simple.equals(typeSimple)) {
+              var byName = e.getValue().get(target.getNameAsString());
+              if (byName != null)
+                pool.addAll(byName);
+            }
+          }
+
+          List<MethodSignature> arity = pool.stream()
+              .filter(ms -> ms.getParameterTypes().size() == target.getArguments().size())
+              .collect(Collectors.toList());
+
+          if (arity.size() == 1) {
+            MethodSignature ms = arity.get(0);
+            String fqn = ms.getDeclClassType().getFullyQualifiedName();
+            if (isProjectish(fqn, ctx, index, testFqn)) {
+              producers.compute(ms, (k, old) -> mergeProducer(old, role, varName));
+              return; // fallback riuscito
+            }
+          }
+        }
+      }
+
+      // --- Fallback “no-resolve” #2: scope è "new Type(...)" ----------------------
+      // es: "new Engine(dummyJobsDir).getProfileCxmlResource()"
+      if (target.getScope().isPresent() && target.getScope().get() instanceof ObjectCreationExpr oce) {
+        String typeSimple = oce.getType().getName().getIdentifier(); // "Engine"
+        if (typeSimple != null && !typeSimple.isEmpty()) {
+          // match nel pool CG: classi con simple name == Engine e metodo ==
+          // target.getNameAsString()
+          List<MethodSignature> pool = new ArrayList<>();
+          for (var e : index.entrySet()) {
+            String fqn = e.getKey();
+            String simple = fqn.substring(fqn.lastIndexOf('.') + 1);
+            if (simple.equals(typeSimple)) {
+              var byName = e.getValue().get(target.getNameAsString());
+              if (byName != null)
+                pool.addAll(byName);
+            }
+          }
+
+          // filtra per stessa arity dell'invocazione
+          List<MethodSignature> arity = pool.stream()
+              .filter(ms -> ms.getParameterTypes().size() == target.getArguments().size())
+              .collect(Collectors.toList());
+
+          if (arity.size() == 1) {
+            MethodSignature ms = arity.get(0);
+            String fqn = ms.getDeclClassType().getFullyQualifiedName();
+            if (isProjectish(fqn, ctx, index, testFqn)) {
+              producers.compute(ms, (k, old) -> mergeProducer(old, role, varName));
+              return; // fallback riuscito
+            }
+          }
+        }
+      }
+
+      // Nessun fallback sicuro -> comportamento invariato
       return;
+    }
+
+    // --- Risolto con SymbolSolver: prosegui con match CG/elastico/fallback
+    // testuale ---
     ResolvedMethodDeclaration r = resolved.get();
-
     String classFqn = r.declaringType().getQualifiedName();
-    if (!ctx.projectProdClasses().contains(classFqn))
-      return;
-
     int paramCount = r.getNumberOfParams();
     String methodName = r.getName();
 
-    MethodSignature ms = matchExistingSignature(index, classFqn, methodName, paramCount)
-        .orElse(null);
-    if (ms == null)
-      return;
+    // 1) match rigido su CG
+    Optional<MethodSignature> matched = matchExistingSignature(index, classFqn, methodName, paramCount);
 
-    producers.compute(ms, (k, old) -> {
-      if (old == null) {
-        Set<String> vars = new LinkedHashSet<>();
-        if (varName != null)
-          vars.add(varName);
-        return new ProducerInfo(role, 1L, vars);
+    // 2) match elastico (name+arity unico nel pool)
+    if (matched.isEmpty()) {
+      matched = findUniqueByNameArity(index, ctx, methodName, paramCount);
+    }
+
+    if (matched.isPresent()) {
+      MethodSignature ms = matched.get();
+      String fqn = ms.getDeclClassType().getFullyQualifiedName();
+      if (isProjectish(fqn, ctx, index, testFqn)) {
+        producers.compute(ms, (k, old) -> mergeProducer(old, role, varName));
+        return;
       }
-      Set<String> vars = new LinkedHashSet<>(old.variableNames);
+    }
+
+    // 3) fallback testuale se la classe è “project-ish”
+    if (isProjectish(classFqn, ctx, index, testFqn)) {
+      String textual = toAngleSignature(r);
+      producers.compute(textual, (k, old) -> mergeProducer(old, role, varName));
+    }
+  }
+
+  // Unifica l’aggiornamento delle occorrenze e la raccolta dei nomi variabili
+  // legati al producer
+  private ProducerInfo mergeProducer(ProducerInfo old, Role role, String varName) {
+    if (old == null) {
+      Set<String> vars = new LinkedHashSet<>();
       if (varName != null)
         vars.add(varName);
-      return new ProducerInfo(role, old.occurrences + 1, vars);
-    });
+      return new ProducerInfo(role, 1L, vars);
+    }
+    Set<String> vars = new LinkedHashSet<>(old.variableNames);
+    if (varName != null)
+      vars.add(varName);
+    return new ProducerInfo(old.role, old.occurrences + 1, vars);
+  }
+
+  // Costruisce una firma testuale stile SootUp: "<com.pkg.Clazz: Ret
+  // name(T1,T2,...)>"
+  private String toAngleSignature(ResolvedMethodDeclaration r) {
+    String cls = r.declaringType().getQualifiedName();
+    String ret = r.getReturnType().describe();
+    String name = r.getName();
+    String params = java.util.stream.IntStream.range(0, r.getNumberOfParams())
+        .mapToObj(i -> r.getParam(i).getType().describe())
+        .collect(Collectors.joining(","));
+    return "<" + cls + ": " + ret + " " + name + "(" + params + ")>";
   }
 
   private Optional<ResolvedMethodDeclaration> resolveSafely(MethodCallExpr mc) {
@@ -268,6 +392,41 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
         .findFirst();
   }
 
+  /**
+   * (PATCH) Match "elastico": se il match per FQN fallisce, cerchiamo per (name,
+   * arity)
+   * tra tutte le classi che hanno quel metodo uscito dal test.
+   * Se esiste un solo candidato ed è di progetto → usalo.
+   */
+  private Optional<MethodSignature> findUniqueByNameArity(
+      Map<String, Map<String, List<MethodSignature>>> index,
+      HeuristicContext ctx,
+      String methodName,
+      int paramCount) {
+
+    List<MethodSignature> pool = new ArrayList<>();
+    for (var byName : index.values()) {
+      var list = byName.get(methodName);
+      if (list != null)
+        pool.addAll(list);
+    }
+    if (pool.isEmpty())
+      return Optional.empty();
+
+    List<MethodSignature> arity = pool.stream()
+        .filter(ms -> ms.getParameterTypes().size() == paramCount)
+        .collect(Collectors.toList());
+
+    if (arity.size() == 1) {
+      MethodSignature only = arity.get(0);
+      String fqn = only.getDeclClassType().getFullyQualifiedName();
+      if (ctx.projectProdClasses().contains(fqn)) {
+        return Optional.of(only);
+      }
+    }
+    return Optional.empty();
+  }
+
   private List<Statement> methodStatements(MethodDeclaration md) {
     if (md.getBody().isEmpty())
       return List.of();
@@ -277,10 +436,14 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
 
   // Produce una lista ordinata di AssertSite, uno per ogni chiamata assert-like
   // trovata nel test
-  // Ogni assertsite ha l'indice dello statement in cui si trova l'assert, lo
-  // statement in cui si trova,
-  // la methodCallExpression che rappresenta la chiamata asser/verify/... trovata
-  // ed infine la lista degli argomenti passati alla chiamata
+  // Ogni AssertSite ha:
+  // - lo statement che contiene la call (ExpressionStmt dell’assert)
+  // - il blocco che contiene lo statement (può essere il body di un
+  // try/if/while/...)
+  // - l’indice "locale" dello statement dentro il blocco (serve per la risalita
+  // ai producer)
+  // - la MethodCallExpr dell’assert
+  // - la lista degli argomenti passati alla chiamata
   private List<AssertSite> collectAsserts(MethodDeclaration md) {
     List<AssertSite> out = new ArrayList<>();
     if (md.getBody().isEmpty())
@@ -319,6 +482,82 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
     return out;
   }
 
+  // Considera "di progetto" se:
+  // 1) è nelle projectProdClasses()
+  // 2) O compare nell'indice delle chiamate dirette del test (CG livello 1)
+  // 3) (opzionale) condivide il root package con la test class (utile in
+  // monorepo)
+  private boolean isProjectish(String fqn,
+      HeuristicContext ctx,
+      Map<String, Map<String, List<MethodSignature>>> index,
+      String testFqn) {
+
+    if (ctx.projectProdClasses().contains(fqn))
+      return true;
+    if (index.containsKey(fqn))
+      return true; // visto nel CG → buon candidato
+
+    // opzionale: stesso root package (es. "com.graphhopper")
+    int firstDot = testFqn.indexOf('.');
+    int secondDot = firstDot < 0 ? -1 : testFqn.indexOf('.', firstDot + 1);
+    if (firstDot > 0 && secondDot > firstDot) {
+      String root = testFqn.substring(0, secondDot); // "com.graphhopper"
+      if (fqn.startsWith(root + "."))
+        return true;
+    }
+    return false;
+  }
+
+  // Estrae i tipi dichiarati localmente nel metodo: "GCModel model = ...;" ->
+  // localTypes.put("model","GCModel")
+  private Map<String, String> collectLocalTypes(MethodDeclaration md) {
+    Map<String, String> out = new HashMap<>();
+    md.findAll(VariableDeclarationExpr.class).forEach(vde -> {
+      String typeSimple = vde.getElementType().isClassOrInterfaceType()
+          ? vde.getElementType().asClassOrInterfaceType().getName().getIdentifier()
+          : vde.getElementType().asString();
+      vde.getVariables().forEach(v -> out.put(v.getNameAsString(), typeSimple));
+    });
+    return out;
+  }
+
+  // Cerca dentro mc (se stesso + annidate) la prima call il cui declaring type è
+  // "project-ish".
+  private MethodCallExpr pickProjectOwnedCall(MethodCallExpr mc,
+      HeuristicContext ctx,
+      Map<String, Map<String, List<MethodSignature>>> index,
+      String testFqn) {
+    List<MethodCallExpr> all = new ArrayList<>();
+    all.add(mc);
+    all.addAll(mc.findAll(MethodCallExpr.class)); // include anche mc
+
+    return all.stream()
+        .sorted((a, b) -> {
+          var pa = a.getRange().map(r -> r.begin).orElse(null);
+          var pb = b.getRange().map(r -> r.begin).orElse(null);
+          if (pa == null || pb == null)
+            return 0;
+          int cmp = Integer.compare(pa.line, pb.line);
+          return (cmp != 0) ? cmp : Integer.compare(pa.column, pb.column);
+        })
+        .filter(c -> {
+          var r = resolveSafely(c);
+          if (r.isEmpty())
+            return false;
+          String fqn = r.get().declaringType().getQualifiedName();
+          return isProjectish(fqn, ctx, index, testFqn);
+        })
+        .findFirst()
+        .orElse(mc); // se non trovi call "di progetto", tieni l'originale
+  }
+
+  /**
+   * Ricerca il "producer" (chiamata di metodo) che ha assegnato la variabile
+   * 'var'
+   * risalendo prima all’interno del blocco locale, poi (se serve) risalendo ai
+   * blocchi padre.
+   * Supporta scenari con try/catch/if/while nidificati.
+   */
   private Optional<MethodCallExpr> findProducerOfVar(BlockStmt startBlock, int beforeIndex, String var) {
     BlockStmt block = startBlock;
     int idx = beforeIndex;

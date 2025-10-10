@@ -193,10 +193,7 @@ public final class ModuleAnalyzer {
               cfg.onlyFromFile(),
               cfg.preflightN(),
               cfg.preflightMinHeadroomMb(),
-              cfg.skipOnOom(),
-              cfg.integrationMinProjectClasses(),
-              cfg.integrationMinProjectMethods(),
-              cfg.highConcentrationThreshold());
+              cfg.skipOnOom());
 
           List<TestRecord> results = strategy.analyzeBatch(
               repoName,

@@ -18,16 +18,14 @@ import java.util.Map;
  * - Campi principali test (repo, module, testClass, testMethod)
  * - Classificazione (kind, score, confidence)
  * - Focal (class, method)
- * - Sintesi call-graph minimale (uniqueProjectClasses, maxDepth)
- * - Conteggio classi progetto dirette (non la lista completa)
  * - Tutte le euristiche con metricId, meta, candidates
  * (value/confidence/evidence)
  *
- * RIMOSSI come “superflui” rispetto alla richiesta:
+ * RIMOSSI come “superflui”:
  * - cfgId
- * - Dettagli granulari cgStats (manteniamo solo 2 campi chiave)
- * - Lista completa directProjectClasses (sostituita da directProjectClassCount)
- * - projectProdClassesTouched (non distinta al momento)
+ * - Dettagli granulari cgStats
+ * - Qualsiasi duplicazione di "direct calls": i dati sono già esposti tramite
+ * l’euristica "direct_calls_metrics" in "heuristics".
  */
 public final class JsonlOutputSink implements OutputSink {
 
@@ -80,9 +78,7 @@ public final class JsonlOutputSink implements OutputSink {
         .put("class", r.focalClass() == null ? JSONObject.NULL : r.focalClass())
         .put("method", r.focalMethod() == null ? JSONObject.NULL : r.focalMethod());
 
-    int directCount = (r.directProjectClasses() == null) ? 0 : r.directProjectClasses().size();
-
-    // Heuristics array
+    // Heuristics array (include anche "direct_calls_metrics" se presente)
     JSONArray heuristicsArr = new JSONArray();
     if (r.heuristicResults() != null) {
       for (HeuristicResult hr : r.heuristicResults()) {
@@ -109,7 +105,6 @@ public final class JsonlOutputSink implements OutputSink {
         .put("testMethod", r.testMethod())
         .put("classification", classification)
         .put("focal", focal)
-        .put("directProjectClassCount", directCount)
         .put("heuristics", heuristicsArr);
 
     if (!splitByRepo) {
