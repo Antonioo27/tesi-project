@@ -60,7 +60,7 @@ import java.util.stream.Collectors;
 public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
 
   /** Toggle globale per i log di debug. */
-  private static final boolean DEBUG = true;
+  private static final boolean DEBUG = false;
 
   private static void debug(String fmt, Object... args) {
     if (!DEBUG)
@@ -106,6 +106,8 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
       return empty("parse_failure");
     }
 
+    ImportIndex importIndex = buildImportIndex(cu);
+
     // Trova il metodo di test nell'AST
     Optional<MethodDeclaration> maybeMd = cu.findAll(MethodDeclaration.class).stream()
         .filter(m -> m.getNameAsString().equals(testMethodName))
@@ -148,7 +150,7 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
     Set<String> projectishSet = new HashSet<>(ctx.projectProdClasses());
     projectishSet.addAll(scanMainSourcesForFqns(ctx.modulePath())); // sorgenti main rilevati dal filesystem
 
-    // NUOVO: aggiungi le classi viste dal test nel CG, ma filtra le librerie
+    // aggiungi le classi viste dal test nel CG, ma filtra le librerie
     projectishSet.addAll(
         index.keySet().stream()
             .filter(fqn -> !isClearlyLibrary(fqn))
@@ -173,7 +175,7 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
           debug("  [ARG] direct call: %s", arg);
           processMethodCall(arg.asMethodCallExpr(), Role.DIRECT, null,
               ctx, index, producers, testFqn, localTypes, projectishSet, ctx.modulePath(),
-              as.block(), as.localIndex(), 0, promotedVars);
+              as.block(), as.localIndex(), 0, promotedVars, importIndex);
           continue;
         }
 
@@ -195,7 +197,7 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
             debug("    [PRODUCER] found for var=%s -> %s", var, mc);
             processMethodCall(mc, Role.VARIABLE_PRODUCER, var,
                 ctx, index, producers, testFqn, localTypes, projectishSet, ctx.modulePath(),
-                as.block(), as.localIndex(), 0, promotedVars);
+                as.block(), as.localIndex(), 0, promotedVars, importIndex);
           });
         }
 
@@ -205,7 +207,7 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
               debug("  [ARG] nested with scope: %s", m);
               processMethodCall(m, Role.DIRECT, null,
                   ctx, index, producers, testFqn, localTypes, projectishSet, ctx.modulePath(),
-                  as.block(), as.localIndex(), 0, promotedVars);
+                  as.block(), as.localIndex(), 0, promotedVars, importIndex);
             });
       }
     }
@@ -315,7 +317,8 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
       BlockStmt assertBlock,
       int assertLocalIdx,
       int depth,
-      Set<String> promotedVars) {
+      Set<String> promotedVars,
+      ImportIndex importIndex) {
 
     // stop ricorsione
     if (depth > 6) {
@@ -340,7 +343,7 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
           if (prod.isPresent() && !sameRange(prod.get(), target)) {
             processMethodCall(prod.get(), Role.VARIABLE_PRODUCER, scopeVar,
                 ctx, index, producers, testFqn, localTypes, projectishSet, modulePath,
-                assertBlock, assertLocalIdx, depth + 1, promotedVars);
+                assertBlock, assertLocalIdx, depth + 1, promotedVars, importIndex);
           } else {
             debug("        [PROMOTE] no producer found for var=%s", scopeVar);
           }
@@ -352,6 +355,28 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
     // --- 2) Se NON risolve: prova fallback scope-var e new Type(...)
     if (resolved.isEmpty()) {
       debug("        [RESOLVE] unresolved. Try fallbacks.");
+
+      // 2a0) import static: nessuno scope -> mappo il proprietario dal nome del
+      // metodo
+      if (target.getScope().isEmpty()) {
+        String ownerFqn = importIndex.staticMethodsByName().get(target.getNameAsString());
+        if (ownerFqn != null) {
+          addByNameArityOrTextual(index, producers, role, varName, ownerFqn, target,
+              projectishSet, testFqn, modulePath);
+          return;
+        }
+      }
+
+      // 2a1) import del tipo: scope è un simple name (es. PluginServlet.foo())
+      if (target.getScope().isPresent() && target.getScope().get().isNameExpr()) {
+        String scopeId = target.getScope().get().asNameExpr().getNameAsString();
+        String fqnFromImport = importIndex.typesBySimple().get(scopeId);
+        if (fqnFromImport != null) {
+          addByNameArityOrTextual(index, producers, role, varName, fqnFromImport, target,
+              projectishSet, testFqn, modulePath);
+          return;
+        }
+      }
 
       // 2a) scope è un NameExpr -> può essere VARIABILE oppure TIPO (call statica)
       if (target.getScope().isPresent() && target.getScope().get().isNameExpr()) {
@@ -392,7 +417,7 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
             if (prod.isPresent() && !sameRange(prod.get(), target)) {
               processMethodCall(prod.get(), Role.VARIABLE_PRODUCER, scopeId,
                   ctx, index, producers, testFqn, localTypes, projectishSet, modulePath,
-                  assertBlock, assertLocalIdx, depth + 1, promotedVars);
+                  assertBlock, assertLocalIdx, depth + 1, promotedVars, importIndex);
             } else {
               debug("        [PROMOTE] none found for var=%s", scopeId);
             }
@@ -461,9 +486,23 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
         }
       }
 
+      // 2e) ultimo tentativo: unico (name, arity) nel CG tra classi di progetto
+      Optional<MethodSignature> uniq = findUniqueByNameArity(index, ctx,
+          target.getNameAsString(), target.getArguments().size());
+      if (uniq.isPresent()) {
+        MethodSignature ms = uniq.get();
+        String fqn = ms.getDeclClassType().getFullyQualifiedName();
+        if (isProjectish(fqn, projectishSet, index, testFqn, modulePath)) {
+          debug("        [ADD] CG unique (name,arity) -> %s", ms);
+          producers.compute(ms, (k, o) -> mergeProducer(o, role, varName, fqn, true));
+          return;
+        }
+      }
+
       // nessun fallback sicuro
       debug("        [RESOLVE] no safe fallback matched");
       return;
+
     }
 
     // --- 3) Risolto e NON libreria: match CG / elastico / fallback testuale
@@ -535,6 +574,33 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
         .mapToObj(i -> r.getParam(i).getType().describe())
         .collect(Collectors.joining(","));
     return "<" + cls + ": " + ret + " " + name + "(" + params + ")>";
+  }
+
+  // NEW: prova name+arity nel CG; se unico ok, altrimenti aggiunge firma testuale
+  // "<FQN: ? name(?)>"
+  private void addByNameArityOrTextual(
+      Map<String, Map<String, List<MethodSignature>>> index,
+      Map<Object, ProducerInfo> producers,
+      Role role, String varName, String ownerFqn, MethodCallExpr target,
+      Set<String> projectishSet, String testFqn, Path modulePath) {
+
+    List<MethodSignature> pool = Optional.ofNullable(index.get(ownerFqn))
+        .map(m -> m.get(target.getNameAsString()))
+        .orElse(List.of());
+
+    List<MethodSignature> arity = pool.stream()
+        .filter(ms -> ms.getParameterTypes().size() == target.getArguments().size())
+        .collect(Collectors.toList());
+
+    if (arity.size() == 1 && isProjectish(ownerFqn, projectishSet, index, testFqn, modulePath)) {
+      MethodSignature ms = arity.get(0);
+      debug("        [ADD] CG match (import) -> %s", ms);
+      producers.compute(ms, (k, o) -> mergeProducer(o, role, varName, ownerFqn, true));
+    } else if (isProjectish(ownerFqn, projectishSet, index, testFqn, modulePath)) {
+      String textual = "<" + ownerFqn + ": ? " + target.getNameAsString() + "(?)>";
+      debug("        [ADD] TEXT (import) -> %s", textual);
+      producers.compute(textual, (k, o) -> mergeProducer(o, role, varName, ownerFqn, true));
+    }
   }
 
   private Optional<ResolvedMethodDeclaration> resolveSafely(MethodCallExpr mc) {
@@ -627,6 +693,9 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
     List<AssertSite> out = new ArrayList<>();
     if (md.getBody().isEmpty())
       return out;
+    // topLevel (che può essere anche un IfStmt, TryStmt, WhileStmt, ecc.), cerca
+    // tutte le MethodCallExpr annidate dentro quello statement.
+    // Filtra solo quelle che sono “assert-like” (es. assertNull,
     for (Statement topLevel : methodStatements(md)) {
       for (MethodCallExpr mc : topLevel.findAll(MethodCallExpr.class)) {
         if (!isAssertionLike(mc))
@@ -920,17 +989,18 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
       Map<String, Map<String, List<MethodSignature>>> index,
       Path modulePath,
       String testFqn) {
+
     List<String> candidates = new ArrayList<>();
 
-    // 1) Dai sorgenti "di progetto" (set costruito da projectProdClasses +
-    // scanMainSources)
+    // 1) sorgenti di progetto già noti (prodClasses + scanMainSources + CG
+    // filtrato)
     for (String fqn : projectishSet) {
       if (fqn.endsWith("." + simple)) {
         candidates.add(fqn);
       }
     }
 
-    // 2) Se vuoto, prova dal CG ma filtra librerie e richiedi "project-ish"
+    // 2) se vuoto, prova dal CG ma solo "project-ish"
     if (candidates.isEmpty()) {
       for (String fqn : index.keySet()) {
         if (fqn.endsWith("." + simple) && !isClearlyLibrary(fqn)
@@ -942,11 +1012,53 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
 
     debug("        [STATIC-SIMPLE] simple=%s -> candidates=%s", simple, candidates);
 
-    // Accetta solo se UNIVOCO
-    if (candidates.size() == 1) {
+    if (candidates.size() == 1)
       return Optional.of(candidates.get(0));
-    }
+
+    // tie-breaker 1: stesso root package del test
+    List<String> sameRoot = candidates.stream()
+        .filter(fqn -> sharesRootPackage(fqn, testFqn))
+        .collect(Collectors.toList());
+    if (sameRoot.size() == 1)
+      return Optional.of(sameRoot.get(0));
+    if (!sameRoot.isEmpty())
+      candidates = sameRoot;
+
+    // tie-breaker 2: sorgente presente su disco
+    List<String> withSource = candidates.stream()
+        .filter(fqn -> sourceExists(modulePath, fqn))
+        .collect(Collectors.toList());
+    if (withSource.size() == 1)
+      return Optional.of(withSource.get(0));
+
     return Optional.empty();
+  }
+
+  // NEW
+  private record ImportIndex(Map<String, String> typesBySimple,
+      Map<String, String> staticMethodsByName) {
+  }
+
+  private ImportIndex buildImportIndex(CompilationUnit cu) {
+    Map<String, String> types = new HashMap<>();
+    Map<String, String> staticMeth = new HashMap<>();
+    cu.getImports().forEach(imp -> {
+      String q = imp.getNameAsString();
+      if (!imp.isAsterisk()) {
+        if (imp.isStatic()) {
+          int lastDot = q.lastIndexOf('.');
+          if (lastDot > 0) {
+            String cls = q.substring(0, lastDot);
+            String m = q.substring(lastDot + 1);
+            staticMeth.put(m, cls); // es: getWildcardMappedObject -> org.foo.PluginServlet
+          }
+        } else {
+          String simple = q.substring(q.lastIndexOf('.') + 1);
+          types.put(simple, q); // es: PluginServlet -> org.foo.PluginServlet
+        }
+      }
+    });
+    return new ImportIndex(types, staticMeth);
   }
 
   private Map<String, Object> evidence(ProducerInfo pi, long maxOcc, int totalAssertions, boolean det) {
@@ -966,11 +1078,13 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
 
   private boolean isAssertionLike(MethodCallExpr mc) {
     String n = mc.getNameAsString().toLowerCase(Locale.ROOT);
-    if (n.startsWith("assert") || n.startsWith("check") || n.startsWith("expect") || n.equals("fail"))
+    if (n.startsWith("assert") || n.startsWith("check") || n.startsWith("expect")
+        || n.equals("fail") || n.equals("assertthat")) {
       return true;
+    }
     return mc.getScope()
         .map(s -> s.toString().toLowerCase(Locale.ROOT))
-        .filter(sc -> sc.contains("assert") || sc.contains("junit"))
+        .filter(sc -> sc.contains("assert") || sc.contains("junit") || sc.contains("hamcrest"))
         .isPresent();
   }
 
