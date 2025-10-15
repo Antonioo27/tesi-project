@@ -1,173 +1,427 @@
-# Tesi Project - Advanced Test Classification Analysis Tesi Project
+# Tesi Project - Advanced Test Analysis with Pluggable Heuristics
 
-Questo repository contiene due applicazioni Java sviluppate per il progetto di tesi sull'analisi dei test unitari e di integrazione nei repository Java:Questo repository contiene due applicazioni Java sviluppate per il progetto di tesi:
+Questo repository contiene due applicazioni Java sviluppate per il progetto di tesi sull'analisi automatica dei test unitari e di integrazione nei repository Java:
 
-- **repo-manager**: applicazione per scaricare repository Maven da SEART e clonarli in batch.- **repo-manager**: applicazione per scaricare repository Maven da SEART e clonarli in batch.
+- **repo-manager**: applicazione per scaricare repository Maven da SEART e clonarli in batch
+- **analyzer**: applicazione per analizzare i repository utilizzando un'architettura modulare basata su euristiche pluggabili
 
-- **analyzer**: applicazione per analizzare i repository scaricati utilizzando tecniche avanzate di classificazione dei test e rilevamento dei metodi focali.- **analyzer**: applicazione per analizzare i repository scaricati.
+## Struttura
 
-## Struttura Struttura
+- `repo-manager/` — Clonazione delle repository da SEART
+- `analyzer/` — Analisi del codice con architettura basata su collector + combiner
 
-- `repo-manager/` — Clonazione delle repository- `repo-manager/` — Clonazione delle repository
+## Caratteristiche Principali dell'Analyzer
 
-- `analyzer/` — Analisi del codice con algoritmi avanzati di classificazione dei test- `analyzer/` — Analisi del codice
+### **Architettura Modulare Heuristic-Based**
 
-## Caratteristiche Principali dell'Analyzer Requisiti
+L'analyzer implementa una separazione netta tra:
 
-### **Classificazione Avanzata dei Test**Prima di eseguire le applicazioni, è necessario:
+- **Collector (ChaCallGraphAnalyzer)**: Raccoglie dati tramite analisi del call graph senza prendere decisioni
+- **Heuristics**: Estraggono metriche specifiche con candidati e confidence scores (0-1)
+- **Combiner**: Interpreta i risultati delle euristiche per produrre classificazioni finali
 
-- **EnhancedHybridTestClassifier**: Classificazione multi-fattoriale che combina analisi a livello di classe e metodo
+Questa architettura permette di:
+- Aggiungere nuove euristiche senza modificare il collector
+- Sperimentare con diversi combiners per logiche di classificazione alternative
+- Mantenere separati i dati raccolti dalle decisioni interpretative
 
-- **Soglie configurabili**: `integrationMinProjectClasses` e `integrationMinProjectMethods` per una classificazione più precisa- Avere **Java 17** (o superiore) e **Maven** installati.
+### **Euristiche Implementate**
 
-- **Analisi della concentrazione**: Rilevamento di test con alta concentrazione di chiamate a classi specifiche- Configurare e avviare un'istanza locale di [SEART](https://seart-ghs.si.usi.ch/) seguendo le istruzioni riportate nel progetto **Docker Compose** fornito (cartella `ghs`, esterna a questo repository).
+1. **DirectCallsMetricHeuristic**
+   - Analizza le chiamate dirette dal test method
+   - Calcola concentrazione e distribuzione delle chiamate tra classi
+   - Produce metriche: `totalMethodCalls`, `uniqueClassCount`, `concentration`
 
-- Impostare un **token GitHub** per autenticarsi durante il clonaggio dei repository.
+2. **NameBasedFocalClassHeuristicV2**
+   - Rileva la focal class basandosi su convenzioni di naming
+   - Pattern supportati: `XyzTest` → `Xyz`, `TestXyz` → `Xyz`
+   - Confidence score basato sul match della convenzione
 
-### **Rilevamento Intelligente dei Metodi Focali**
+3. **AssertionAwareFocalMethodHeuristic**
+   - Usa JavaParser per analisi AST del codice sorgente
+   - Identifica metodi usati in asserzioni (es. `assertEquals(expected, obj.method())`)
+   - Distingue ruoli: DIRECT (chiamata diretta in assert) vs VARIABLE_PRODUCER (produce variabile usata in assert)
 
-- **AssertionAwareFocalMethodHeuristic**: Euristica avanzata che analizza il bytecode per identificare i metodi focali## Come eseguire
+4. **MockUsageHeuristic**
+   - Rileva l'uso di mock: annotazioni `@Mock`, chiamate a `Mockito.mock()`
+   - Analizza patterns di verification (`verify()`) e stubbing (`when()`)
+   - Calcola `verificationRatio` per distinguere mock assertion-focused da mock per setup
 
-- **Analisi delle asserzioni**: Riconoscimento automatico di pattern di test basati su asserzioni
+### **Sistema di Confidence**
 
-- **Scoring intelligente**: Sistema di punteggio che privilegia metodi con nomi significativi e pattern di test comuni1. Assicurati di avere Java e Maven installati.
+Ogni euristica restituisce un `HeuristicResult` contenente:
+```java
+record HeuristicResult(
+    String heuristicId,
+    List<Candidate<?>> candidates,  // Lista di candidati ordinati per confidence
+    Map<String, Object> metadata    // Metriche aggiuntive
+)
 
-2. Imposta la variabile d’ambiente `GITHUB_TOKEN`:
+record Candidate<T>(
+    T value,
+    double confidence,   // 0.0 - 1.0
+    String rationale,    // Spiegazione della scelta
+    Map<String, Object> evidence  // Dettagli di supporto
+)
+```
+
+Questo approccio permette di:
+- Fornire più candidati alternativi invece di una singola risposta
+- Quantificare l'incertezza delle decisioni
+- Facilitare il debugging e l'interpretazione dei risultati
 
 ### **Analisi del Call Graph**
 
-- Integrazione con **SootUp framework** per l'analisi statica del codice **Windows PowerShell**
-
+- Integrazione con **SootUp framework** per analisi statica CHA (Class Hierarchy Analysis)
 - Traversal BFS con limiti configurabili per evitare esplosioni del grafo
+- Identificazione automatica di classi di progetto vs librerie
+- Supporto per progetti Maven multi-modulo
 
-- Rilevamento automatico dell'uso di mock e framework di test ```powershell
+### **Combiner Configurabile**
 
-  $env:GITHUB_TOKEN="ghp_tuo_token"
+Il `TestResultCombiner` è pluggabile:
+```java
+interface TestResultCombiner {
+    TestRecord combine(RawTestAnalysis raw);
+}
+```
 
-### **Configurazione Flessibile** ```
+**ExampleTestResultCombiner** (implementazione di riferimento):
+- Fonde segnali da multiple euristiche (assertion-based forte, name-based debole)
+- Calcola `unitIntegrationScore` (0-1) basato su volume chiamate e concentrazione
+- Classifica come UNIT/INTEGRATION con confidence score
+- Applica penalità/boost basate su mock usage e verification patterns
+
+### **Configurazione Flessibile**
 
 - Parametri CLI estesi per personalizzare l'analisi
-- Modalità auto-tune per l'ottimizzazione automatica delle performance
-- Supporto per analisi incrementale e resume
-
-## Parametri di Configurazione
-
-### Nuovi Parametri per la Classificazione Avanzata
-
-```bash
---integrationMinProjectClasses 2    # Soglia minima per classificazione INTEGRATION
---integrationMinProjectMethods 6    # Soglia minima a livello di metodo
---highConcentrationThreshold 0.8    # Soglia per rilevamento alta concentrazione
---autoFastHeuristic false           # Disabilita euristica veloce per analisi completa
-```
-
-### Esempio di Esecuzione Completa
-
-```bash
-mvn compile exec:java -Dexec.mainClass="ghs.analyzer.app.Main" \
-  -Dexec.args="--base ../repo-manager/cloned_repos \
-               --out ../out \
-               --splitByRepo \
-               --integrationMinProjectClasses 2 \
-               --integrationMinProjectMethods 6 \
-               --highConcentrationThreshold 0.8 \
-               --autoFastHeuristic false"
-```
+- Modalità **auto-tune** per ottimizzazione automatica delle performance in base alla dimensione del progetto
+- Supporto per **analisi incrementale** e **resume** con checkpoint per-modulo
+- Gestione robusta degli errori con skip su OutOfMemory
 
 ## Requisiti
 
-Prima di eseguire le applicazioni, è necessario:
+- **Java 17** (o superiore)
+- **Maven**
 
-- Avere **Java 17** (o superiore) e **Maven** installati.
-- Configurare e avviare un'istanza locale di [SEART](https://seart-ghs.si.usi.ch/) seguendo le istruzioni riportate nel progetto **Docker Compose** fornito (cartella `ghs`, esterna a questo repository).
-- Impostare un **token GitHub** per autenticarsi durante il clonaggio dei repository.
+## Come Eseguire
 
-## Come eseguire
+### Repo Manager
 
-1. Assicurati di avere Java e Maven installati.
-2. Imposta la variabile d'ambiente `GITHUB_TOKEN`:
+Il repo-manager clona repository Maven in batch. Eseguirlo dalla directory `repo-manager/`:
 
-   **Windows PowerShell**
+```powershell
+cd repo-manager
+mvn compile exec:java
+```
 
-   ```powershell
-   $env:GITHUB_TOKEN="ghp_tuo_token"
-   ```
+I repository vengono clonati nella cartella `cloned_repos/`. Puoi configurare la lista dei repository da clonare modificando il file `repos.txt`.
 
-3. Clona i repository con repo-manager:
+### Analyzer
 
-   ```powershell
-   cd repo-manager
-   mvn compile exec:java
-   ```
+L'analyzer analizza i test nei repository Maven. Eseguirlo dalla directory `analyzer/`:
 
-4. Analizza i repository con l'analyzer avanzato:
+**Esempio Base**
+```powershell
+cd analyzer
+mvn -q -DskipTests exec:java -Dexec.args="--base ../repo-manager/cloned_repos --out analysis.jsonl"
+```
 
-   ```powershell
-   cd analyzer
-   mvn compile exec:java -Dexec.mainClass="ghs.analyzer.app.Main" `
-     -Dexec.args="--base ../repo-manager/cloned_repos --out ../out --splitByRepo --integrationMinProjectClasses 2 --integrationMinProjectMethods 6 --highConcentrationThreshold 0.8"
-   ```
+**Esempio con Parametri Avanzati**
+```powershell
+mvn -q -DskipTests exec:java -Dexec.args="--base ../repo-manager/cloned_repos --out analysis.jsonl --maxDepth 3 --maxVisited 25000 --splitByRepo --autoTune --resume"
+```
+
+**Analizzare un Singolo Repository**
+```powershell
+mvn -q -DskipTests exec:java -Dexec.args="--base ../repo-manager/cloned_repos/commons-lang --out commons-lang-analysis.jsonl"
+```
+
+## Parametri di Configurazione
+
+### Parametri I/O
+- `--base <path>`: Directory base contenente i repository da analizzare (richiesto)
+- `--out <path>`: File di output JSONL (default: `analysis.jsonl`)
+- `--splitByRepo`: Crea un file separato per ogni repository
+- `--append`: Appende ai file esistenti invece di sovrascriverli
+- `--onlyFrom <file>`: Analizza solo i repository listati nel file specificato
+
+### Parametri Traversal
+- `--maxDepth <n>`: Profondità massima del BFS nel call graph (default: 3)
+- `--maxVisited <n>`: Numero massimo di nodi visitati per test (default: 10000)
+
+### Parametri Auto-tune
+- `--autoTune`: Abilita auto-tuning in base alla dimensione del progetto
+- `--bigThr <n>`: Soglia per progetti "big" (default: 20 test)
+- `--hugeThr <n>`: Soglia per progetti "huge" (default: 100 test)
+- `--autoBatchBig <n>`: Batch size per progetti big (default: 5)
+- `--autoBatchHuge <n>`: Batch size per progetti huge (default: 1)
+- `--autoVisitedBig <n>`: MaxVisited per progetti big (default: 3000)
+- `--autoVisitedHuge <n>`: MaxVisited per progetti huge (default: 1000)
+
+### Parametri Resume e Robustezza
+- `--resume`: Riprende l'analisi da dove si era interrotta
+- `--resumeReset`: Resetta lo stato di resume prima di iniziare
+- `--skipOnOom`: Salta i moduli che causano OutOfMemoryError
+- `--batchSize <n>`: Numero di test da analizzare prima di ricreare SootUp view (default: 10)
+- `--batchesPerView <n>`: Numero di batch prima di ricostruire la view (default: 5)
+- `--preflightN <n>`: Numero di test usati per preflight check (default: 5)
+- `--preflightMinHeadroomMb <n>`: Memoria minima richiesta dopo preflight (default: 500 MB)
 
 ## Output dell'Analisi
 
-L'analyzer genera file JSONL con informazioni dettagliate per ogni test:
+L'analyzer genera file JSONL con un record per ogni test analizzato:
 
 ```json
 {
   "repo": "apollo",
+  "module": "/path/to/cloned_repos/apollo/apollo-core",
+  "cfgId": "d3_v10000",
   "testClass": "com.ctrip.framework.apollo.openapi.service.ConsumerServiceTest",
   "testMethod": "void testGenerateConsumerToken()",
-  "testKind": "UNIT",
   "focalClass": "com.ctrip.framework.apollo.openapi.service.ConsumerService",
   "focalMethod": "<com.ctrip.framework.apollo.openapi.service.ConsumerService: java.lang.String generateToken(java.lang.String,java.util.Date,java.lang.String)>",
-  "unit_integration_score": 0.0,
-  "cgStats": {
-    "projectCalls": 2,
-    "uniqueProjectClasses": 1,
-    "callsToFocalClass": 2,
-    "maxDepthVisited": 3
-  },
-  "usesMocks": false
+  "unitIntegrationScore": 0.23,
+  "testKind": "UNIT",
+  "classificationConfidence": 0.85,
+  "heuristicResults": [
+    {
+      "heuristicId": "name_based_focal_class",
+      "candidates": [
+        {
+          "value": "com.ctrip.framework.apollo.openapi.service.ConsumerService",
+          "confidence": 0.9,
+          "rationale": "Test name pattern match",
+          "evidence": {"pattern": "ConsumerServiceTest -> ConsumerService"}
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "heuristicId": "assertion_focal_method",
+      "candidates": [
+        {
+          "value": "generateToken",
+          "confidence": 0.8,
+          "rationale": "Direct call in assertion",
+          "evidence": {"role": "DIRECT", "callSite": "line 42"}
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "heuristicId": "direct_calls_metrics",
+      "candidates": [],
+      "metadata": {
+        "totalMethodCalls": 5,
+        "uniqueClassCount": 2,
+        "concentration": 0.6
+      }
+    },
+    {
+      "heuristicId": "mock_usage",
+      "candidates": [],
+      "metadata": {
+        "mockCount": 0,
+        "verificationRatio": 0.0
+      }
+    }
+  ]
 }
 ```
 
-## Algoritmi Implementati
+### Campi del TestRecord
 
-### EnhancedHybridTestClassifier
+- **repo**: Nome del repository
+- **module**: Path del modulo Maven analizzato
+- **cfgId**: ID configurazione (es. `d3_v10000` = depth 3, maxVisited 10000)
+- **testClass**: Fully qualified name della classe di test
+- **testMethod**: Signature del metodo di test
+- **focalClass**: Focal class identificata (può essere null)
+- **focalMethod**: Focal method identificato (può essere null)
+- **unitIntegrationScore**: Score 0-1 (valori bassi = UNIT, alti = INTEGRATION)
+- **testKind**: Classificazione finale (`UNIT` o `INTEGRATION`)
+- **classificationConfidence**: Confidence della classificazione (0-1)
+- **heuristicResults**: Lista completa dei risultati di tutte le euristiche
 
-- **Analisi Multi-livello**: Combina evidenze a livello di classe e metodo
-- **Classificazione Adattiva**: Utilizza soglie configurabili per diversi tipi di progetto
-- **Rilevamento Pattern**: Identifica pattern specifici dei test di integrazione
+## Architettura del Sistema
 
-### AssertionAwareFocalMethodHeuristic
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    AnalyzerPipeline                         │
+│  - Scansiona moduli Maven                                   │
+│  - Gestisce resume e OOM handling                           │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   ModuleAnalyzer                            │
+│  - Warm-up SootUp                                           │
+│  - Test discovery (JUnit 4/5, TestNG)                       │
+│  - Auto-tuning batch size                                   │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│              FullCallGraphStrategy                          │
+│  - Costruisce call graph (CHA)                              │
+│  - Esegue euristiche                                        │
+│  - Combina risultati                                        │
+└─────┬─────────────────────────────┬─────────────────────────┘
+      │                             │
+      ▼                             ▼
+┌──────────────────┐        ┌──────────────────────┐
+│ ChaCallGraphAnalyzer      │  HeuristicEngine     │
+│ - BFS traversal           │  - Esegue tutte      │
+│ - Raccolta dati           │    le euristiche     │
+│ - NO decisioni            │  - Gestione errori   │
+│                           │  - Aggregazione      │
+└──────────┬────────┘       └──────────┬───────────┘
+           │                            │
+           ▼                            ▼
+┌──────────────────────────────────────────────────┐
+│            RawTestAnalysis                       │
+│  - repo, module, test identifiers                │
+│  - usesMocks flag                                │
+│  - directProjectClasses                          │
+│  - heuristicResults (List<HeuristicResult>)      │
+└──────────────────────┬───────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────┐
+│         TestResultCombiner                       │
+│  (ExampleTestResultCombiner)                     │
+│  - Fonde segnali euristiche                      │
+│  - Calcola scores                                │
+│  - Classifica UNIT/INTEGRATION                   │
+└──────────────────────┬───────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────┐
+│             TestRecord                           │
+│  - Output finale scritto in JSONL                │
+└──────────────────────────────────────────────────┘
+```
 
-- **Analisi Bytecode**: Scansione del bytecode per identificare chiamate a metodi
-- **Awareness delle Asserzioni**: Riconoscimento di pattern di asserzione comuni
-- **Scoring Semantico**: Punteggio basato su convenzioni di naming e pattern di test
+## Estendibilità
 
-## Contributi alla Ricerca
+### Aggiungere una Nuova Euristica
 
-Questo progetto contribuisce alla ricerca sull'analisi automatica dei test software attraverso:
+1. Implementare l'interfaccia `Heuristic`:
 
-1. **Classificazione Automatica**: Distinzione accurata tra test unitari e di integrazione
-2. **Rilevamento Metodi Focali**: Identificazione automatica dei metodi sotto test
-3. **Analisi Empirica**: Valutazione su repository open-source reali
-4. **Metriche Avanzate**: Nuove metriche per la qualità della classificazione dei test
+```java
+package ghs.heuristics;
 
-## Risultati della Ricerca
+public class MyCustomHeuristic implements Heuristic {
+    @Override
+    public String id() {
+        return "my_custom_heuristic";
+    }
+    
+    @Override
+    public HeuristicResult run(HeuristicContext ctx) throws Exception {
+        // ctx contiene: testMethod, callGraph, projectClasses, testSource (Optional)
+        
+        List<Candidate<String>> candidates = new ArrayList<>();
+        // ... logica di analisi ...
+        
+        candidates.add(new Candidate<>(
+            "candidateValue",
+            0.75,  // confidence
+            "Why this candidate was chosen",
+            Map.of("key", "evidence")
+        ));
+        
+        return new HeuristicResult(
+            id(),
+            candidates,
+            Map.of("metric1", value1, "metric2", value2)
+        );
+    }
+}
+```
 
-L'implementazione degli algoritmi avanzati ha dimostrato:
+2. Registrare l'euristica in `Main.java`:
 
-- **Miglioramenti nella classificazione**: Classificazione più accurata dei test con zero regressioni
-- **Rilevamento migliorato dei metodi focali**: Incremento del successo nella identificazione dei metodi focali per test UNIT
-- **Stabilità**: Mantenimento delle performance su repository con classificazione già ottimale
-- **Scalabilità**: Analisi efficiente su grandi repository con migliaia di test
+```java
+List<Heuristic> heuristics = List.of(
+    new NameBasedFocalClassHeuristic(),
+    new AssertionAwareFocalMethodHeuristic(),
+    new MockUsageHeuristic(),
+    new DirectCallsMetricHeuristic(),
+    new MyCustomHeuristic()  // <-- aggiungere qui
+);
+```
+
+### Implementare un Combiner Personalizzato
+
+1. Implementare l'interfaccia `TestResultCombiner`:
+
+```java
+package ghs.combine;
+
+public class MyCustomCombiner implements TestResultCombiner {
+    @Override
+    public TestRecord combine(RawTestAnalysis raw) {
+        // Leggere i risultati delle euristiche
+        List<HeuristicResult> results = raw.heuristicResults();
+        
+        // Implementare logica custom di combinazione
+        String focalClass = determineFocalClass(results);
+        double score = calculateScore(results);
+        TestKind kind = classify(score);
+        
+        return new TestRecord(
+            raw.repo(),
+            raw.module(),
+            raw.cfgId(),
+            raw.testClass(),
+            raw.testMethod(),
+            focalClass,
+            focalMethod,
+            score,
+            kind,
+            confidence,
+            results
+        );
+    }
+}
+```
+
+2. Usare il nuovo combiner in `Main.java`:
+
+```java
+TestResultCombiner combiner = new MyCustomCombiner();
+```
 
 ## Tecnologie Utilizzate
 
 - **Java 17**: Linguaggio di sviluppo principale
 - **Maven**: Sistema di build e gestione dipendenze
-- **SootUp 2.0.0**: Framework per analisi statica del codice Java
-- **ASM**: Libreria per analisi bytecode
+- **SootUp 2.0.0**: Framework per analisi statica del codice Java (CHA, call graph)
+- **JavaParser 3.26.2**: Parsing e analisi AST del codice sorgente Java
 - **JGit**: Libreria per operazioni Git
-- **Jackson**: Serializzazione JSON per output risultati
+- **Jackson**: Serializzazione/deserializzazione JSON per output risultati
+- **JUnit 4/5 & TestNG**: Rilevamento dei test method
+
+## Vantaggi dell'Architettura
+
+1. **Separazione delle Responsabilità**: Il collector raccoglie dati grezzi, il combiner interpreta
+2. **Estendibilità**: Aggiungere nuove euristiche o combiners senza modificare il core
+3. **Trasparenza**: Tutti i dati intermedi sono disponibili nell'output per debugging
+4. **Riproducibilità**: I risultati grezzi possono essere ri-combinati offline con logiche diverse
+5. **Confidence-based**: Ogni decisione è quantificata con un livello di certezza
+
+## Contributi alla Ricerca
+
+Questo progetto contribuisce alla ricerca sull'analisi automatica dei test software attraverso:
+
+1. **Architettura Modulare**: Separazione netta tra raccolta dati e decisioni interpretative
+2. **Sistema di Confidence**: Quantificazione dell'incertezza invece di decisioni binarie
+3. **Multi-Source Evidence**: Fusione di segnali da multiple fonti (AST, call graph, convenzioni)
+4. **Analisi Empirica**: Valutazione su repository open-source reali con migliaia di test
+5. **Reproducibilità**: Output completo con tutti i dati intermedi per validazione
+
+## Licenza
+
+Questo progetto è sviluppato per scopi di ricerca accademica presso l'Università di Bologna.
