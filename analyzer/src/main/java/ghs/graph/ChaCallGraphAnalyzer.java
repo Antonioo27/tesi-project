@@ -104,8 +104,8 @@ public final class ChaCallGraphAnalyzer {
                                 .distinct()
                                 .collect(Collectors.toList());
 
-                long callsToLibraries = libraryClasses.size();
 
+                //ok
                 // Stampa le classi di libreria
                 // System.out.println("Classi di libreria chiamate: " + libraryClasses);
 
