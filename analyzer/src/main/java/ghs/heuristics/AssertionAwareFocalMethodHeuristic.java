@@ -106,9 +106,10 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
       return empty("parse_failure");
     }
 
+    // Creiamo un indice degli import del file Java in analisi
     ImportIndex importIndex = buildImportIndex(cu);
 
-    // Trova il metodo di test nell'AST
+    // Trova il metodo di test nell'AST, confronto name + arity
     Optional<MethodDeclaration> maybeMd = cu.findAll(MethodDeclaration.class).stream()
         .filter(m -> m.getNameAsString().equals(testMethodName))
         .filter(m -> m.getParameters().size() == testSig.getParameterTypes().size())
@@ -119,7 +120,8 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
     }
     MethodDeclaration md = maybeMd.get();
 
-    // Mappa dei tipi locali (simple name): es. model -> GCModel
+    // Mappa dei tipi locali (simple name): es. model -> GCModel, da usare come
+    // fallback nel caso SymbolResolve fallisce
     Map<String, String> localTypes = collectLocalTypes(md);
     debug("[RUN] localTypes=%s", localTypes);
 
@@ -202,6 +204,9 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
         }
 
         // 3) fallback: catene annidate con scope presente (es. obj.foo().bar())
+        // arg.findAll(MethodCallExpr.class, ...): Questo è il comando chiave. Dice:
+        // "Scansiona l'intera espressione arg e dammi una lista di
+        // tutte le MethodCallExpr che trovi al suo interno".
         arg.findAll(MethodCallExpr.class, m -> m.getScope().isPresent()).stream().findFirst()
             .ifPresent(m -> {
               debug("  [ARG] nested with scope: %s", m);
@@ -694,19 +699,18 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
     if (md.getBody().isEmpty())
       return out;
     // topLevel (che può essere anche un IfStmt, TryStmt, WhileStmt, ecc.), cerca
-    // tutte le MethodCallExpr annidate dentro quello statement.
+    // tutte le MethodCallExpr annidate dentro quello statement a qualsiasi livello
+    // di profondita.
     // Filtra solo quelle che sono “assert-like” (es. assertNull,
     for (Statement topLevel : methodStatements(md)) {
       for (MethodCallExpr mc : topLevel.findAll(MethodCallExpr.class)) {
         if (!isAssertionLike(mc))
           continue;
 
-        // Statement che contiene *direttamente* la call (es. l’ExpressionStmt
-        // dell’assert)
+        // findAncestor risale al genitore stmt piu' vicino all'asserzione
         Statement stmtOfCall = mc.findAncestor(Statement.class).orElse(topLevel);
 
-        // Blocco che contiene quello statement (può essere il body del try, di un if,
-        // ecc.)
+        // qui fa lo stesso di prima, solo che lo facciamo per il tipo BlockStmt
         BlockStmt block = stmtOfCall.findAncestor(BlockStmt.class).orElse(null);
 
         int idx = -1;
@@ -1034,7 +1038,9 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
     return Optional.empty();
   }
 
-  // NEW
+  // Record che contiene una mappa per associare nomi semplici delle classi ai
+  // loro nomi completi
+  // mappa che associa i nomi dei metodi statici alla classe che li definisce
   private record ImportIndex(Map<String, String> typesBySimple,
       Map<String, String> staticMethodsByName) {
   }
@@ -1042,8 +1048,10 @@ public final class AssertionAwareFocalMethodHeuristic implements Heuristic {
   private ImportIndex buildImportIndex(CompilationUnit cu) {
     Map<String, String> types = new HashMap<>();
     Map<String, String> staticMeth = new HashMap<>();
+    // cicla su ogni dichiarazione di import nel file
     cu.getImports().forEach(imp -> {
       String q = imp.getNameAsString();
+      // se non e' specificata la classe o il metodo -> import inutile
       if (!imp.isAsterisk()) {
         if (imp.isStatic()) {
           int lastDot = q.lastIndexOf('.');
