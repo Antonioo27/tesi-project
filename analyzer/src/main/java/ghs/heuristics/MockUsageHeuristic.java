@@ -126,45 +126,8 @@ public final class MockUsageHeuristic implements Heuristic {
     List<MethodCallExpr> allCalls = md.findAll(MethodCallExpr.class);
 
     // =============== STUBBINGS (UNIFICATO: SOLO WHEN(...)) ===============
-    Set<MethodCallExpr> countedWhen = Collections.newSetFromMap(new IdentityHashMap<>());
 
-    for (MethodCallExpr call : allCalls) {
-      if (!isWhenCall(call) || countedWhen.contains(call))
-        continue;
-
-      // VERIFICA PROFONDA: esistono MethodCallExpr dentro QUALSIASI argomento di
-      // when(...)?
-      boolean hasNestedMethodCall = call.getArguments().stream()
-          .anyMatch(arg -> !arg.findAll(MethodCallExpr.class).isEmpty());
-
-      if (hasNestedMethodCall) {
-        // Stile A: when(mock.m(...)) oppure when(() -> StaticUtil.m(...)) (lambda)
-        for (Expression arg : call.getArguments()) {
-          for (MethodCallExpr inner : arg.findAll(MethodCallExpr.class)) {
-            inner.getScope()
-                .flatMap(this::asSimpleVarName) // "repo" / "this.repo" / "StaticUtil" / "holder.repo"
-                .ifPresent(var -> {
-                  String key = normalizeKey(var, mockAliases, spyAliases, staticAliases);
-                  if (stats.containsKey(key)) {
-                    stats.get(key).stubbings++;
-                    countedWhen.add(call); // conta una sola volta quel when
-                  }
-                });
-          }
-        }
-      } else {
-        // Stile B: doReturn(...).when(mock).m(...) -> arg0 è il mock
-        if (!call.getArguments().isEmpty()) {
-          asSimpleVarName(call.getArgument(0)).ifPresent(var -> {
-            String key = normalizeKey(var, mockAliases, spyAliases, staticAliases);
-            if (stats.containsKey(key)) {
-              stats.get(key).stubbings++;
-              countedWhen.add(call);
-            }
-          });
-        }
-      }
-    }
+    findStubbings(allCalls, mockAliases, spyAliases, staticAliases, stats);
 
     // =============== VERIFY INVOCATIONS (raw: verify(mock)) ===============
     // Si occupa solo di verify(mock) come invocazione diretta (non del metodo
@@ -172,54 +135,10 @@ public final class MockUsageHeuristic implements Heuristic {
     // Prende arg0 di verify(...) e lo normalizza con asSimpleVarName.
     // Se è un mock noto → verifyInvocations++.
     // =============== VERIFY INVOCATIONS (raw: verify(mock)) ===============
-    for (MethodCallExpr call : allCalls) {
-      if (isVerifyCall(call) && !call.getArguments().isEmpty()) {
 
-        // Caso normale: verify(varMock, ...)
-        Optional<String> arg0Var = asSimpleVarName(call.getArgument(0));
-        if (arg0Var.isPresent()) {
-          String key = normalizeKey(arg0Var.get(), mockAliases, spyAliases, staticAliases);
-          if (stats.containsKey(key))
-            stats.get(key).verifications++;
-          continue;
-        }
+    findVerifications(allCalls, mockAliases, spyAliases, staticAliases, stats);
 
-        // Caso MockedStatic: ms.verify(() -> StaticUtil.foo(...), times(..))
-        call.getScope()
-            .flatMap(this::asSimpleVarName) // "ms"
-            .map(staticAliases::get) // "StaticUtil"
-            .ifPresent(staticClass -> {
-              if (stats.containsKey(staticClass))
-                stats.get(staticClass).verifications++;
-            });
-      }
-    }
-
-    // =============== DIRECT CALLS (saltando when/verify) ===============
-    for (MethodCallExpr call : allCalls) {
-      // 1) salta tutto ciò che è nel contesto verify(...)
-      if (inVerifyContext(call)) {
-        // stai già contando le raw verify(mock) nel loop dedicato,
-        // e non vuoi contare queste call come direct
-        continue;
-      }
-
-      // 2) salta tutto ciò che è nel contesto when(...)
-      if (inWhenContext(call)) {
-        // gli stubbing sono già contati nel blocco unificato su when(...)
-        continue;
-      }
-
-      // 3) altrimenti: direct call (mock.foo())
-      call.getScope()
-          .flatMap(this::asSimpleVarName)
-          .ifPresent(var -> {
-            String key = normalizeKey(var, mockAliases, spyAliases, staticAliases);
-            if (stats.containsKey(key))
-              stats.get(key).directCalls++;
-          });
-
-    }
+    findDirectCalls(allCalls, mockAliases, spyAliases, staticAliases, stats);
 
     // Rimuovi mock mai usati (senza alcuna interazione forte: direct/stub/verify)
     stats.entrySet().removeIf(e -> e.getValue().totalInteractions() == 0);
@@ -350,6 +269,116 @@ public final class MockUsageHeuristic implements Heuristic {
       }
     });
     return aliases;
+  }
+
+  // =============== STUBBINGS (UNIFICATO: SOLO WHEN(...)) ===============
+  private void findStubbings(
+      List<MethodCallExpr> allCalls,
+      Map<String, String> mockAliases,
+      Map<String, String> spyAliases,
+      Map<String, String> staticAliases,
+      Map<String, Stats> stats) {
+
+    for (MethodCallExpr call : allCalls) {
+      if (!isWhenCall(call))
+        continue;
+
+      // VERIFICA PROFONDA: esistono MethodCallExpr dentro QUALSIASI argomento di
+      // when(...)?
+      boolean hasNestedMethodCall = call.getArguments().stream()
+          .anyMatch(arg -> !arg.findAll(MethodCallExpr.class).isEmpty());
+
+      if (hasNestedMethodCall) {
+        // Stile A: when(mock.m(...)) oppure when(() -> StaticUtil.m(...)) (lambda)
+        for (Expression arg : call.getArguments()) {
+          for (MethodCallExpr inner : arg.findAll(MethodCallExpr.class)) {
+            inner.getScope()
+                .flatMap(this::asSimpleVarName) // "repo" / "this.repo" / "StaticUtil" /
+                // "holder.repo"
+                .ifPresent(var -> {
+                  String key = normalizeKey(var, mockAliases, spyAliases, staticAliases);
+                  if (stats.containsKey(key)) {
+                    stats.get(key).stubbings++;
+                  }
+                });
+          }
+        }
+      } else {
+        // Stile B: doReturn(...).when(mock).m(...) -> arg0 è il mock
+        if (!call.getArguments().isEmpty()) {
+          asSimpleVarName(call.getArgument(0)).ifPresent(var -> {
+            String key = normalizeKey(var, mockAliases, spyAliases, staticAliases);
+            if (stats.containsKey(key)) {
+              stats.get(key).stubbings++;
+            }
+          });
+        }
+      }
+    }
+  }
+
+  private void findVerifications(
+      List<MethodCallExpr> allCalls,
+      Map<String, String> mockAliases,
+      Map<String, String> spyAliases,
+      Map<String, String> staticAliases,
+      Map<String, Stats> stats) {
+
+    for (MethodCallExpr call : allCalls) {
+      if (isVerifyCall(call) && !call.getArguments().isEmpty()) {
+
+        // Caso normale: verify(varMock, ...)
+        Optional<String> arg0Var = asSimpleVarName(call.getArgument(0));
+        if (arg0Var.isPresent()) {
+          String key = normalizeKey(arg0Var.get(), mockAliases, spyAliases, staticAliases);
+          if (stats.containsKey(key))
+            stats.get(key).verifications++;
+          continue;
+        }
+
+        // Caso MockedStatic: ms.verify(() -> StaticUtil.foo(...), times(..))
+        call.getScope()
+            .flatMap(this::asSimpleVarName) // "ms"
+            .map(staticAliases::get) // "StaticUtil"
+            .ifPresent(staticClass -> {
+              if (stats.containsKey(staticClass))
+                stats.get(staticClass).verifications++;
+            });
+      }
+    }
+  }
+
+  private void findDirectCalls(
+      List<MethodCallExpr> allCalls,
+      Map<String, String> mockAliases,
+      Map<String, String> spyAliases,
+      Map<String, String> staticAliases,
+      Map<String, Stats> stats) {
+
+    for (MethodCallExpr call : allCalls) {
+      // 1) salta tutto ciò che è nel contesto verify(...)
+      if (inVerifyContext(call)) {
+        // stai già contando le raw verify(mock) nel loop dedicato,
+        // e non vuoi contare queste call come direct
+        continue;
+      }
+
+      // 2) salta tutto ciò che è nel contesto when(...)
+      if (inWhenContext(call)) {
+        // gli stubbing sono già contati nel blocco unificato su when(...)
+        continue;
+      }
+
+      // 3) altrimenti: direct call (mock.foo())
+      call.getScope()
+          .flatMap(this::asSimpleVarName)
+          .ifPresent(var -> {
+            String key = normalizeKey(var, mockAliases, spyAliases, staticAliases);
+            if (stats.containsKey(key))
+              stats.get(key).directCalls++;
+          });
+
+    }
   }
 
   // var MockedStatic -> staticClassSimpleName (es. "ms" -> "StaticUtil")
